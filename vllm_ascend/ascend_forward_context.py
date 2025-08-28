@@ -11,7 +11,6 @@ from vllm.forward_context import (BatchDescriptor, get_forward_context,
                                   set_forward_context)
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.distributed.moe_comm_method import MoECommMethod
 
 
 class FusedMoEState(Enum):
@@ -47,6 +46,18 @@ def _get_fused_moe_state(ep_size: int, with_prefill: bool,
         return FusedMoEState.MC2
 
 
+def get_dispatcher_name(ep_size: int, with_prefill: bool) -> str:
+    if ep_size == 1:
+        return "TokenDispatcherWithAllGather"
+
+    if ep_size < 16:
+        return "TokenDispatcherWithAll2AllV"
+
+    if with_prefill:
+        return "TokenDispatcherWithAll2AllV"
+    return "TokenDispatcherWithMC2"
+
+
 @contextmanager
 def set_ascend_forward_context(
         attn_metadata: Any,
@@ -57,7 +68,7 @@ def set_ascend_forward_context(
         with_prefill: bool = True,
         in_profile_run: bool = False,
         reserved_mc2_mask: Optional[torch.Tensor] = None,
-        moe_comm_method: Optional[MoECommMethod] = None,
+        moe_comm_method: str = "",
         num_actual_tokens: Optional[int] = None,
         aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         batch_descriptor: Optional[BatchDescriptor] = None):
@@ -75,7 +86,7 @@ def set_ascend_forward_context(
             batch_descriptor=batch_descriptor,
     ):
         forward_context = get_forward_context()
-        forward_context.moe_comm_method = moe_comm_method
+        forward_context.moe_comm_method_name = moe_comm_method + "commimpl"
         forward_context.with_prefill = with_prefill
         ep_size = (get_ep_group().world_size if
                    vllm_config.parallel_config.enable_expert_parallel else 1)
@@ -87,6 +98,14 @@ def set_ascend_forward_context(
                                                is_deepseek_v3_r1)
         forward_context.fused_moe_state = fused_moe_state
         forward_context.in_profile_run = in_profile_run
+
+        with_quant = vllm_config.quant_config is not None
+        forward_context.with_quant = with_quant
+        from vllm_ascend.ops.moe_dispatcher.token_dispatcher import \
+            get_token_dispatcher
+        dispatcher_name = get_dispatcher_name(ep_size, with_prefill)
+        dispatcher = get_token_dispatcher(dispatcher_name)
+        forward_context.token_dispatcher = dispatcher
 
         # NOTE: This cannot be set using set_forward_context
         # due to multiple warmups before actual capturing
