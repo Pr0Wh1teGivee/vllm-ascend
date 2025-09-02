@@ -18,8 +18,10 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.models.deepseek_mtp import CustomDeepSeekMTP
+from vllm_ascend.torchair.models.torchair_deepseek_mtp import \
+    TorchairDeepSeekMTP
 from vllm_ascend.torchair.utils import TorchairCommonAttentionMetadata
-from vllm_ascend.utils import ProfileExecuteDuration
+from vllm_ascend.utils import ProfileExecuteDuration, lmhead_tp_enable
 
 
 class MtpProposer:
@@ -235,8 +237,20 @@ class MtpProposer:
                         previous_hidden_states=self.
                         hidden_states[:num_input_tokens],
                         kv_caches=self.runner.kv_caches[-1:])
+
+        num_indices = last_token_indices.shape[0]
+        if lmhead_tp_enable():
+            if not self.runner.with_prefill:
+                max_num_reqs_across_dp = num_input_tokens
+            else:
+                max_num_reqs_across_dp = self.vllm_config.scheduler_config.max_num_seqs
+            last_token_indices = nn.functional.pad(
+                last_token_indices, (0, max_num_reqs_across_dp - num_indices))
+
         sample_hidden_states = hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
+        if lmhead_tp_enable() and num_indices < logits.shape[0]:
+            logits = logits[:num_indices]
         draft_token_ids = logits.argmax(dim=-1)
 
         # [batch_size, 1]
@@ -254,8 +268,12 @@ class MtpProposer:
         with set_default_torch_dtype(
                 draft_model_config.dtype), set_current_vllm_config(
                     self.vllm_config):
-            self.model = CustomDeepSeekMTP(
-                vllm_config=self.vllm_config).to(target_device)
+            if self.torchair_graph_enabled:
+                self.model = TorchairDeepSeekMTP(
+                    vllm_config=self.vllm_config).to(target_device)
+            else:
+                self.model = CustomDeepSeekMTP(
+                    vllm_config=self.vllm_config).to(target_device)
 
         draft_attn_layer_names = (
             get_layers_from_vllm_config(self.vllm_config, Attention).keys() -

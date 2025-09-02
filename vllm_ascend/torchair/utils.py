@@ -168,7 +168,7 @@ def register_torchair_model():
         "vllm_ascend.torchair.models.qwen2:CustomQwen2ForCausalLM")
 
     ModelRegistry.register_model(
-        "Qwen3ForCausalLM",
+        "Qwen3MoeForCausalLM",
         "vllm_ascend.torchair.models.qwen3_moe:CustomQwen3MoeForCausalLM")
 
 
@@ -182,3 +182,17 @@ def torchair_quant_method_register():
         "W8A8_DYNAMIC"] = TorchairW8A8DYNAMICQuantizer
     SUPPORT_ASCEND_QUANTIZER_TYPE[
         "W4A8_DYNAMIC"] = TorchairW4A8DYNAMICQuantizer
+
+
+def torchair_ops_patch():
+    from vllm_ascend.ops.rotary_embedding import (
+        AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
+    from vllm_ascend.torchair.ops.torchair_rotary_embedding import (
+        deepseek_rope_init_func, native_rope_deepseek_forward,
+        qwen_rope_init_func, rope_forward)
+
+    AscendRotaryEmbedding.__init__ = qwen_rope_init_func  # type: ignore[method-assign]
+    AscendRotaryEmbedding.forward_oot = rope_forward  # type: ignore[method-assign]
+
+    AscendDeepseekScalingRotaryEmbedding.__init__ = deepseek_rope_init_func  # type: ignore[method-assign]
+    AscendDeepseekScalingRotaryEmbedding.forward = native_rope_deepseek_forward  # type: ignore[method-assign]
