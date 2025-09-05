@@ -18,7 +18,6 @@
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import torch
-
 from tests.ut.base import TestBase
 from vllm_ascend.ops.moe_dispatcher.token_dispatcher import (
     AscendSocVersion, TokenDispatcherWithAll2AllV,
