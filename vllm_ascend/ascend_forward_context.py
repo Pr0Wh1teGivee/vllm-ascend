@@ -83,9 +83,6 @@ def set_ascend_forward_context(
             batch_descriptor=batch_descriptor,
     ):
         forward_context = get_forward_context()
-        if moe_comm_method == "allgather" and with_prefill:
-            moe_comm_method = "naivemulticast"
-
         forward_context.moe_comm_method_name = moe_comm_method + "commimpl"
         forward_context.with_prefill = with_prefill
         tp_world_size = get_tensor_model_parallel_world_size()

@@ -24,9 +24,7 @@ from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.fused_moe import unified_fused_experts_eager
 from vllm_ascend.ops.moe.experts_selector import select_experts
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 
@@ -259,25 +257,6 @@ class AscendW8A8DynamicFusedMoEMethod:
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share
         )
-            
-        # return unified_fused_experts_eager(
-        #     hidden_states=x,
-        #     w1=layer.w13_weight,
-        #     w1_scale=layer.w13_weight_scale_fp32,
-        #     w2=layer.w2_weight,
-        #     w2_scale=layer.w2_weight_scale,
-        #     topk_weights=topk_weights,
-        #     topk_ids=topk_ids,
-        #     row_idx=row_idx,
-        #     expert_map=expert_map,
-        #     log2phy=log2phy,
-        #     global_redundant_expert_num=global_redundant_expert_num,
-        #     shared_experts=shared_experts,
-        #     shared_gate_up=shared_gate_up,
-        #     shared_dequant_scale=shared_dequant_scale,
-        #     mc2_mask=kwargs.get("mc2_mask", None),
-        #     with_quant=True,
-        #     fusion_mlp=True)
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:

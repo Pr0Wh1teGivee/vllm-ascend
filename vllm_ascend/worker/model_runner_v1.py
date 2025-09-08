@@ -1511,7 +1511,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             kv_connector_output=kv_connector_output,
         )
 
-    def _select_moe_comm_method(self, num_tokens: int) -> str:
+    def _select_moe_comm_method(self, num_tokens: int, with_prefill: bool) -> str:
         """1. If expert parallel is not enabled, we use all-gather since MC2 and all-to-all
         are designed for expert parallelism.
         2. If expert parallel is enabled, we need to consider the soc version and the
@@ -1547,6 +1547,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             moe_comm_method = "mc2" if num_tokens <= self.mc2_tokens_capacity else "alltoall"
         else:
             raise ValueError(f"Unsupported soc_version: {soc_version}")
+        
+        if moe_comm_method == "allgather" and with_prefill:
+            moe_comm_method = "naivemulticast"
 
         if is_global_first_rank():
             logger.debug(f"num_tokens: {num_tokens}, "
@@ -1576,7 +1579,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
              intermediate_tensors) = (self._prepare_inputs(
                  scheduler_output, intermediate_tensors))
 
-        moe_comm_method = self._select_moe_comm_method(num_input_tokens)
+        moe_comm_method = self._select_moe_comm_method(num_input_tokens, self.with_prefill)
 
         batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
                                            uniform_decode=False)
@@ -1947,7 +1950,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         (num_tokens, num_tokens_across_dp, with_prefill,
          _) = self._sync_metadata_across_dp(num_tokens, with_prefill, False)
 
-        moe_comm_method = self._select_moe_comm_method(num_tokens)
+        moe_comm_method = self._select_moe_comm_method(num_tokens, with_prefill)
 
         # If cudagraph_mode.decode_mode() == FULL and
         # cudagraph_mode.seperate_routine(). This means that we are using

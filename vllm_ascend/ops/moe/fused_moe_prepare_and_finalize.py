@@ -277,7 +277,7 @@ class FusedMoEPrepareAndFinalizeWithNaiveMulticast(FusedMoEPrepareAndFinalize):
                 router_logits = self._naive_multicast(
                     router_logits, self.cu_tokens_across_dp_cpu)
 
-            return hidden_states, router_logits, None
+        return hidden_states, router_logits, None
 
     def finalize(self, hidden_states: torch.Tensor,
                  reduce_results: bool) -> torch.Tensor:

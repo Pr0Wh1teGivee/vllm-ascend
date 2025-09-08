@@ -24,9 +24,7 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context
 
-from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.fused_moe import unified_fused_experts_eager
 from vllm_ascend.ops.moe.experts_selector import select_experts
 
 
@@ -304,26 +302,6 @@ class AscendW4A8DynamicFusedMoEMethod:
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share
         )
-
-        # return unified_fused_experts_eager(
-        #     hidden_states=x,
-        #     w1=layer.w13_weight,
-        #     w2=layer.w2_weight,
-        #     w1_scale=layer.w13_weight_scale_second,
-        #     w2_scale=layer.w2_weight_scale_second,
-        #     w1_scale_bias=layer.w13_scale_bias,
-        #     w2_scale_bias=layer.w2_scale_bias,
-        #     topk_weights=topk_weights,
-        #     topk_ids=topk_ids,
-        #     row_idx=row_idx,
-        #     expert_map=expert_map,
-        #     log2phy=log2phy,
-        #     global_redundant_expert_num=global_redundant_expert_num,
-        #     shared_experts=shared_experts,
-        #     shared_gate_up=shared_gate_up,
-        #     shared_dequant_scale=shared_dequant_scale,
-        #     mc2_mask=kwargs.get("mc2_mask", None),
-        #     with_quant=True)
 
     def process_scale(self, weight: torch.Tensor, scale, per_group_scale):
         group_num, k, n = weight.shape

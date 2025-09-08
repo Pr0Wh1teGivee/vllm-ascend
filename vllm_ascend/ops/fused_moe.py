@@ -462,64 +462,6 @@ class AscendFusedMoE(FusedMoE):
             replace_allreduce=replace_allreduce,
             gate=gate)
 
-        # if (fused_moe_state not in [
-        #         FusedMoEState.AllGather, FusedMoEState.AllGatherEP,
-        #         FusedMoEState.NaiveMulticast
-        # ] and not replace_allreduce):
-        #     if fused_moe_state in {FusedMoEState.MC2}:
-        #         padding_size = forward_context.padded_num_tokens
-        #     else:
-        #         # TODO: Determine if we can remove the padding
-        #         padding_size = tp_size
-        #     if num_tokens < padding_size and not self.enable_shared_expert_dp:
-        #         hidden_states = nn.functional.pad(
-        #             hidden_states, (0, 0, 0, padding_size - num_tokens))
-        #         router_logits = nn.functional.pad(
-        #             router_logits, (0, 0, 0, padding_size - num_tokens))
-        #     if tp_size > 1:
-        #         tp_rank = get_tensor_model_parallel_rank()
-        #         if not self.enable_shared_expert_dp:
-        #             chunk_hidden_states = torch.tensor_split(hidden_states,
-        #                                                      tp_size,
-        #                                                      dim=0)
-        #             chunk_router_logits = torch.tensor_split(router_logits,
-        #                                                      tp_size,
-        #                                                      dim=0)
-        #             hidden_states = chunk_hidden_states[tp_rank]
-        #             router_logits = chunk_router_logits[tp_rank]
-
-        #         chunk_mc2_mask = torch.tensor_split(mc2_mask, tp_size, dim=0)
-        #         mc2_mask = chunk_mc2_mask[tp_rank]
-
-        # if self.dp_size > 1:
-        #     if fused_moe_state == FusedMoEState.AllGather:
-        #         # NOTE: When in torchair graph, it has been padded in model_runner_v1
-        #         max_tokens_across_dp = forward_context.max_tokens_across_dp
-        #         if num_tokens < max_tokens_across_dp:
-        #             hidden_states = nn.functional.pad(
-        #                 hidden_states,
-        #                 (0, 0, 0, max_tokens_across_dp - num_tokens))
-        #             if not self.rm_router_logits:
-        #                 router_logits = nn.functional.pad(
-        #                     router_logits,
-        #                     (0, 0, 0, max_tokens_across_dp - num_tokens))
-        #         hidden_states = get_dp_group().all_gather(hidden_states, 0)
-        #         if self.rm_router_logits:
-        #             router_logits, _ = gate(hidden_states)
-        #         else:
-        #             router_logits = get_dp_group().all_gather(router_logits, 0)
-
-        #     elif fused_moe_state == FusedMoEState.NaiveMulticast:
-        #         cu_tokens_across_dp_cpu = get_forward_context(
-        #         ).dp_metadata.cu_tokens_across_dp_cpu
-        #         hidden_states = self.naive_multicast(hidden_states,
-        #                                              cu_tokens_across_dp_cpu)
-        #         if self.rm_router_logits:
-        #             router_logits, _ = gate(hidden_states)
-        #         else:
-        #             router_logits = self.naive_multicast(
-        #                 router_logits, cu_tokens_across_dp_cpu)
-
         # Matrix multiply.
         e_hidden_states = self.quant_method.apply(
             layer=self,
