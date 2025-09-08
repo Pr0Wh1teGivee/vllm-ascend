@@ -93,9 +93,9 @@ class MoETokenDispatcher(ABC):
                        expert_map: Optional[torch.Tensor] = None,
                        log2phy: Optional[torch.Tensor] = None,
                        global_redundant_expert_num: int = 0,
-                       shared_experts: Optional[torch.Tensor] = None,
-                       shared_gate_up: Optional[torch.Tensor] = None,
-                       shared_dequant_scale: Optional[torch.Tensor] = None,
+                       shared_experts: Optional[Any] = None,
+                       quantized_x_for_share: Optional[Any] = None,
+                       dynamic_scale_for_share: Optional[Any] = None,
                        mc2_mask: Optional[torch.Tensor] = None,
                        apply_router_weight_on_input: bool = False,
                        with_quant: bool = False):
@@ -192,9 +192,9 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
                        expert_map: Optional[torch.Tensor] = None,
                        log2phy: Optional[torch.Tensor] = None,
                        global_redundant_expert_num: int = 0,
-                       shared_experts: Optional[torch.Tensor] = None,
-                       shared_gate_up: Optional[torch.Tensor] = None,
-                       shared_dequant_scale: Optional[torch.Tensor] = None,
+                       shared_experts: Optional[Any] = None,
+                       quantized_x_for_share: Optional[Any] = None,
+                       dynamic_scale_for_share: Optional[Any] = None,
                        mc2_mask: Optional[torch.Tensor] = None,
                        apply_router_weight_on_input: bool = False,
                        with_quant: bool = False):
@@ -218,6 +218,11 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
 
         if self.with_quant:
             if shared_experts is not None:
+                share_up_out, _ = shared_experts.gate_up_proj(
+                    (quantized_x_for_share, dynamic_scale_for_share))
+                shared_gate_up, shared_dequant_scale = share_up_out[
+                    0], share_up_out[1]
+
                 shared_act_out = shared_experts.act_fn(
                     (shared_gate_up, shared_dequant_scale))
                 self.shared_act, self.swiglu_out_scale = \
@@ -331,9 +336,9 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
                        expert_map: Optional[torch.Tensor] = None,
                        log2phy: Optional[torch.Tensor] = None,
                        global_redundant_expert_num: int = 0,
-                       shared_experts: Optional[torch.Tensor] = None,
-                       shared_gate_up: Optional[torch.Tensor] = None,
-                       shared_dequant_scale: Optional[torch.Tensor] = None,
+                       shared_experts: Optional[Any] = None,
+                       quantized_x_for_share: Optional[Any] = None,
+                       dynamic_scale_for_share: Optional[Any] = None,
                        mc2_mask: Optional[torch.Tensor] = None,
                        apply_router_weight_on_input: bool = False,
                        with_quant: bool = False):
@@ -418,9 +423,9 @@ class UnquantizedTokenDispatcherWithFusedExpertsMoge(MoETokenDispatcher):
                        expert_map: Optional[torch.Tensor] = None,
                        log2phy: Optional[torch.Tensor] = None,
                        global_redundant_expert_num: int = 0,
-                       shared_experts: Optional[torch.Tensor] = None,
-                       shared_gate_up: Optional[torch.Tensor] = None,
-                       shared_dequant_scale: Optional[torch.Tensor] = None,
+                       shared_experts: Optional[Any] = None,
+                       quantized_x_for_share: Optional[Any] = None,
+                       dynamic_scale_for_share: Optional[Any] = None,
                        mc2_mask: Optional[torch.Tensor] = None,
                        apply_router_weight_on_input: bool = False,
                        with_quant: bool = False):
@@ -530,9 +535,9 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
                        expert_map: Optional[torch.Tensor] = None,
                        log2phy: Optional[torch.Tensor] = None,
                        global_redundant_expert_num: int = 0,
-                       shared_experts: Optional[torch.Tensor] = None,
-                       shared_gate_up: Optional[torch.Tensor] = None,
-                       shared_dequant_scale: Optional[torch.Tensor] = None,
+                       shared_experts: Optional[Any] = None,
+                       quantized_x_for_share: Optional[Any] = None,
+                       dynamic_scale_for_share: Optional[Any] = None,
                        mc2_mask: Optional[torch.Tensor] = None,
                        apply_router_weight_on_input: bool = False,
                        with_quant: bool = False):
