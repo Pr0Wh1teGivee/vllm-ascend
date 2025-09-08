@@ -49,7 +49,8 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, dispose_tensor,
                                get_all_reduce_merge_state,
                                get_rm_router_logits_state, is_310p)
 from vllm_ascend.ops.moe.moe_comm_method import (AllGatherCommImpl,
-                                                 AlltoAllCommImpl, MC2CommImpl)
+                                                 AlltoAllCommImpl, MC2CommImpl,
+                                                 NaiveMulticastCommImpl)
 
 
 def unified_fused_experts_eager(hidden_states: torch.Tensor,
@@ -387,7 +388,7 @@ class AscendFusedMoE(FusedMoE):
         self.moe_config.mc2_group = get_mc2_group()
         self.moe_config.num_global_redundant_experts = self.global_redundant_expert_num
 
-        for method in {AllGatherCommImpl, AlltoAllCommImpl, MC2CommImpl}:
+        for method in {AllGatherCommImpl, AlltoAllCommImpl, MC2CommImpl, NaiveMulticastCommImpl}:
             setattr(self, method.__name__.lower(),
                     method(moe_config=self.moe_config))  # type: ignore[abstract]
 
