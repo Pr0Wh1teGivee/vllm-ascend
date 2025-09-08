@@ -83,8 +83,6 @@ class MoECommMethod(ABC):
             is_torchair: bool = False,
             # For Cube/Vector parallel
             shared_experts: Optional[Any] = None,
-            shared_gate_up: Optional[Any] = None,
-            shared_dequant_scale: Optional[Any] = None,
             quantized_x_for_share: Optional[Any] = None,
             dynamic_scale_for_share: Optional[Any] = None,
             # For load balance
@@ -108,8 +106,8 @@ class MoECommMethod(ABC):
             log2phy=log2phy,
             global_redundant_expert_num=global_redundant_expert_num,
             shared_experts=shared_experts,
-            shared_gate_up=shared_gate_up,
-            shared_dequant_scale=shared_dequant_scale,
+            quantized_x_for_share=quantized_x_for_share,
+            dynamic_scale_for_share=dynamic_scale_for_share,
             mc2_mask=self.mc2_mask,
             apply_router_weight_on_input=apply_router_weight_on_input,
             with_quant=use_int8_w8a8 or use_int4_w4a8)
