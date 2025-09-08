@@ -92,13 +92,6 @@ class MoECommMethod(ABC):
             global_redundant_expert_num: int = 0,
             need_trans: bool = False) -> torch.Tensor:
         # Check constraints
-        assert hidden_states.shape[1] == w1.shape[1], (
-            f"Hidden size mismatch {hidden_states.shape[1]} != {w1.shape[1]}")
-        assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
-        assert hidden_states.is_contiguous(
-        ), "Hidden_states must be contiguous"
-        assert w1.stride(-1) == 1, "Stride of last dimension must be 1"
-        assert w2.stride(-1) == 1, "Stride of last dimension must be 1"
         assert hidden_states.dtype in [
             torch.float32, torch.float16, torch.bfloat16
         ]
@@ -136,7 +129,7 @@ class MoECommMethod(ABC):
                                        w2_scale_bias=w2_scale_bias,
                                        with_quant=use_int8_w8a8
                                        or use_int4_w4a8,
-                                       fusion=fusion_mlp,
+                                       fusion=use_int8_w8a8,
                                        need_trans=need_trans)
 
         hidden_states[:] = self.token_dispatcher.token_combine(

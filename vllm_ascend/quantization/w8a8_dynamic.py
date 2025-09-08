@@ -265,8 +265,7 @@ class AscendW8A8DynamicFusedMoEMethod:
             global_redundant_expert_num=global_redundant_expert_num,
             shared_experts=shared_experts,
             shared_gate_up=shared_gate_up,
-            shared_dequant_scale=shared_dequant_scale,
-            fusion_mlp=True
+            shared_dequant_scale=shared_dequant_scale
         )
             
         # return unified_fused_experts_eager(

@@ -264,6 +264,8 @@ class FusedMoEPrepareAndFinalizeWithNaiveMulticast(FusedMoEPrepareAndFinalize):
                 rm_router_logits: bool = False,
                 replace_allreduce: bool = False,
                 gate=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        self.enable_shared_expert_dp = enable_shared_expert_dp
+
         if self.moe_config.dp_size > 1:
             self.cu_tokens_across_dp_cpu = get_forward_context(
             ).dp_metadata.cu_tokens_across_dp_cpu
