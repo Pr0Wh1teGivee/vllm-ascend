@@ -233,14 +233,6 @@ class AscendW8A8DynamicFusedMoEMethod:
                 expert_map=expert_map,
             )
 
-        fused_moe_state = get_forward_context().fused_moe_state
-        shared_gate_up, shared_dequant_scale = None, None
-        if shared_experts is not None and fused_moe_state == FusedMoEState.MC2:
-            share_up_out, _ = shared_experts.gate_up_proj(
-                (quantized_x_for_share, dynamic_scale_for_share))
-            shared_gate_up, shared_dequant_scale = share_up_out[
-                0], share_up_out[1]
-
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
@@ -264,8 +256,8 @@ class AscendW8A8DynamicFusedMoEMethod:
             log2phy=log2phy,
             global_redundant_expert_num=global_redundant_expert_num,
             shared_experts=shared_experts,
-            shared_gate_up=shared_gate_up,
-            shared_dequant_scale=shared_dequant_scale
+            quantized_x_for_share=quantized_x_for_share,
+            dynamic_scale_for_share=dynamic_scale_for_share
         )
             
         # return unified_fused_experts_eager(
