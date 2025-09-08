@@ -197,18 +197,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                                             shared_experts=shared_experts,
                                             need_trans=True)
 
-        # return unified_fused_experts_eager(hidden_states=x,
-        #                                    w1=layer.w13_weight,
-        #                                    w2=layer.w2_weight,
-        #                                    topk_weights=topk_weights,
-        #                                    topk_ids=topk_ids,
-        #                                    row_idx=row_idx,
-        #                                    expert_map=expert_map,
-        #                                    shared_experts=shared_experts,
-        #                                    mc2_mask=kwargs.get(
-        #                                        "mc2_mask", None),
-        #                                    with_quant=False)
-
 
 class AscendFusedMoE(FusedMoE):
 
