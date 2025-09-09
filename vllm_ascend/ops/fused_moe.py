@@ -39,12 +39,13 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.ops.moe.experts_selector import select_experts
-from vllm_ascend.ops.sequence_parallel import MetadataForPadding
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, get_all_reduce_merge_state,
-                               get_rm_router_logits_state, is_310p)
 from vllm_ascend.ops.moe.moe_comm_method import (AllGatherCommImpl,
                                                  AlltoAllCommImpl, MC2CommImpl,
                                                  NaiveMulticastCommImpl)
+from vllm_ascend.ops.sequence_parallel import MetadataForPadding
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ,
+                               get_all_reduce_merge_state,
+                               get_rm_router_logits_state, is_310p)
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -123,18 +124,19 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # currently it is only activated when doing profile runs.
         if enable_force_load_balance and not self.use_aclgraph:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
-            
+
         moe_comm_method = get_forward_context().moe_comm_method
-        return moe_comm_method.fused_experts(hidden_states=x,
-                                            w1=layer.w13_weight,
-                                            w2=layer.w2_weight,
-                                            topk_weights=topk_weights,
-                                            topk_ids=topk_ids,
-                                            row_idx=row_idx,
-                                            global_num_experts=global_num_experts,
-                                            expert_map=expert_map,
-                                            shared_experts=shared_experts,
-                                            need_trans=True)
+        return moe_comm_method.fused_experts(
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            row_idx=row_idx,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+            shared_experts=shared_experts,
+            need_trans=True)
 
 
 class AscendFusedMoE(FusedMoE):
@@ -296,16 +298,20 @@ class AscendFusedMoE(FusedMoE):
         # NOTE: self.tp_group is not expert_tp_group
         self.tp_group = get_tp_group().device_group
         self.quant_method.create_weights(layer=self, **moe_quant_params)
-        
+
         self.moe_config.tp_group = get_tp_group()
         self.moe_config.dp_group = get_dp_group()
         self.moe_config.ep_group = get_ep_group()
         self.moe_config.mc2_group = get_mc2_group()
         self.moe_config.num_global_redundant_experts = self.global_redundant_expert_num
 
-        for method in {AllGatherCommImpl, AlltoAllCommImpl, MC2CommImpl, NaiveMulticastCommImpl}:
-            setattr(self, method.__name__.lower(),
-                    method(moe_config=self.moe_config))  # type: ignore[abstract]
+        for method in {
+                AllGatherCommImpl, AlltoAllCommImpl, MC2CommImpl,
+                NaiveMulticastCommImpl
+        }:
+            setattr(
+                self, method.__name__.lower(),
+                method(moe_config=self.moe_config))  # type: ignore[abstract]
 
     def naive_multicast(self, x: torch.Tensor,
                         cu_tokens_across_dp_cpu: torch.Tensor):
@@ -359,16 +365,16 @@ class AscendFusedMoE(FusedMoE):
             mc2_mask = chunk_mc2_mask[tp_rank]
             replace_allreduce = True
 
-
         moe_comm_method_name = forward_context.moe_comm_method_name
 
         # print("moe_comm_method = ", moe_comm_method_name)
         # moe_comm_method = "allgathercommimpl"
         print("moe_comm_method = ", moe_comm_method_name)
         forward_context.moe_comm_method = getattr(self, moe_comm_method_name)
-        
+
         hidden_states, router_logits = forward_context.moe_comm_method.prepare(
-            hidden_states=hidden_states, router_logits=router_logits,
+            hidden_states=hidden_states,
+            router_logits=router_logits,
             enable_shared_expert_dp=self.enable_shared_expert_dp,
             rm_router_logits=self.rm_router_logits,
             replace_allreduce=replace_allreduce,

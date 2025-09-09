@@ -280,7 +280,7 @@ class AscendW4A8DynamicFusedMoEMethod:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
         topk_weights = topk_weights.to(x.dtype)
-        
+
         moe_comm_method = get_forward_context().moe_comm_method
         print("using w4a8")
         return moe_comm_method.fused_experts(
@@ -300,8 +300,7 @@ class AscendW4A8DynamicFusedMoEMethod:
             global_redundant_expert_num=global_redundant_expert_num,
             shared_experts=shared_experts,
             quantized_x_for_share=quantized_x_for_share,
-            dynamic_scale_for_share=dynamic_scale_for_share
-        )
+            dynamic_scale_for_share=dynamic_scale_for_share)
 
     def process_scale(self, weight: torch.Tensor, scale, per_group_scale):
         group_num, k, n = weight.shape
