@@ -290,7 +290,10 @@ class AscendFusedMoE(FusedMoE):
         self.moe_config.ep_group = get_ep_group()
         self.moe_config.mc2_group = get_mc2_group()
 
-        for method in {AllGatherCommImpl, AlltoAllCommImpl, MC2CommImpl}:
+        for method in {
+                AllGatherCommImpl, AlltoAllCommImpl, MC2CommImpl,
+                NaiveMulticastCommImpl
+        }:
             setattr(
                 self, method.__name__.lower(),
                 method(moe_config=self.moe_config))  # type: ignore[abstract]
