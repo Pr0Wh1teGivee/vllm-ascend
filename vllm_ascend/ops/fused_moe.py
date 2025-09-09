@@ -19,13 +19,10 @@ import os
 from typing import Any, Callable, Optional
 
 import torch
-import torch.distributed as dist
 import torch_npu
-from torch import nn
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_reduce)
+                              get_tensor_model_parallel_world_size)
 from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
                                              get_tp_group)
 from vllm.forward_context import get_forward_context
@@ -39,73 +36,15 @@ from vllm.model_executor.layers.quantization.base_config import \
     QuantizationConfig
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.ops.moe.experts_selector import select_experts
-from vllm_ascend.ops.moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.sequence_parallel import MetadataForPadding
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, dispose_tensor,
-                               get_all_reduce_merge_state,
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, get_all_reduce_merge_state,
                                get_rm_router_logits_state, is_310p)
 from vllm_ascend.ops.moe.moe_comm_method import (AllGatherCommImpl,
                                                  AlltoAllCommImpl, MC2CommImpl,
                                                  NaiveMulticastCommImpl)
-
-
-def unified_fused_experts_eager(hidden_states: torch.Tensor,
-                                w1: torch.Tensor,
-                                w2: torch.Tensor,
-                                topk_weights: torch.Tensor,
-                                topk_ids: torch.Tensor,
-                                row_idx: torch.Tensor,
-                                expert_map: Optional[torch.Tensor] = None,
-                                log2phy: Optional[torch.Tensor] = None,
-                                global_redundant_expert_num: int = 0,
-                                w1_scale: Optional[torch.Tensor] = None,
-                                w1_scale_bias: Optional[torch.Tensor] = None,
-                                w2_scale: Optional[torch.Tensor] = None,
-                                w2_scale_bias: Optional[torch.Tensor] = None,
-                                shared_experts: Optional[torch.Tensor] = None,
-                                shared_gate_up: Optional[Any] = None,
-                                shared_dequant_scale: Optional[Any] = None,
-                                mc2_mask: Optional[torch.Tensor] = None,
-                                apply_router_weight_on_input: bool = False,
-                                with_quant: bool = False,
-                                fusion_mlp: bool = False):
-    token_dispatcher = get_forward_context().token_dispatcher
-
-    results = token_dispatcher.token_dispatch(
-        hidden_states=hidden_states,
-        topk_weights=topk_weights,
-        topk_ids=topk_ids,
-        row_idx=row_idx,
-        expert_map=expert_map,
-        log2phy=log2phy,
-        global_redundant_expert_num=global_redundant_expert_num,
-        shared_experts=shared_experts,
-        shared_gate_up=shared_gate_up,
-        shared_dequant_scale=shared_dequant_scale,
-        mc2_mask=mc2_mask,
-        apply_router_weight_on_input=apply_router_weight_on_input,
-        with_quant=with_quant)
-
-    expert_output = unified_apply_mlp(
-        hidden_states=results["hidden_states"],
-        w1=w1,
-        w1_scale=w1_scale,
-        w2=w2,
-        w2_scale=w2_scale,
-        group_list=results["group_list"],
-        dynamic_scale=results.get("dynamic_scale"),
-        group_list_type=results.get("group_list_type"),
-        w1_scale_bias=w1_scale_bias,
-        w2_scale_bias=w2_scale_bias,
-        topk_scales=results.get("topk_scales"),
-        with_quant=with_quant,
-        fusion=fusion_mlp)
-    final_hidden_states = token_dispatcher.token_combine(expert_output)
-    return final_hidden_states
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -357,18 +296,6 @@ class AscendFusedMoE(FusedMoE):
         # NOTE: self.tp_group is not expert_tp_group
         self.tp_group = get_tp_group().device_group
         self.quant_method.create_weights(layer=self, **moe_quant_params)
-        self.token_dispatcher = None
-
-        ep_size = (get_ep_group().world_size if
-                   vllm_config.parallel_config.enable_expert_parallel else 1)
-        from vllm_ascend.ops.moe.token_dispatcher import \
-            setup_token_dispatchers
-        setup_token_dispatchers(
-            ep_size,
-            top_k=self.top_k,
-            num_experts=self.global_num_experts,
-            num_global_redundant_experts=self.global_redundant_expert_num,
-            num_local_experts=self.local_num_experts)
         
         self.moe_config.tp_group = get_tp_group()
         self.moe_config.dp_group = get_dp_group()
@@ -414,10 +341,7 @@ class AscendFusedMoE(FusedMoE):
         else:
             real_top_k = self.top_k
 
-        num_tokens, hidden_size = hidden_states.shape
-
         forward_context = get_forward_context()
-        fused_moe_state = forward_context.fused_moe_state
         mc2_mask = forward_context.mc2_mask
         # For w8a8 dynamic we can do npu_dynamic_quant and gate in parallel.
         quantized_x_for_share, dynamic_scale_for_share = None, None
@@ -471,7 +395,6 @@ class AscendFusedMoE(FusedMoE):
             global_redundant_expert_num=self.global_redundant_expert_num,
             shared_experts=None,
             mc2_mask=mc2_mask,
-            token_dispatcher=self.token_dispatcher,
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,
         )

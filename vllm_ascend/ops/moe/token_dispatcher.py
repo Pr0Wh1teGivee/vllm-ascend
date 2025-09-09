@@ -22,44 +22,16 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import torch
 import torch_npu
 from vllm.distributed.parallel_state import get_ep_group
 
-import vllm_ascend.envs as envs_ascend
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.moe.comm_utils import (
     async_all_to_all, gather_from_sequence_parallel_region)
 from vllm_ascend.utils import AscendSocVersion, get_ascend_soc_version
-
-_Dispatchers: Dict[str, Any] = {}
-
-
-def _register_token_dispatcher(dispatcher: Any):
-    _Dispatchers[dispatcher.__class__.__name__] = dispatcher
-
-
-def get_token_dispatcher(name: str):
-    return _Dispatchers.get(name)
-
-
-def setup_token_dispatchers(ep_size: int, **kwargs):
-    existing_dispatchers = set(_Dispatchers.keys())
-
-    if ep_size == 1 and "TokenDispatcherWithAllGather" not in existing_dispatchers:
-        _register_token_dispatcher(TokenDispatcherWithAllGather(**kwargs))
-    elif envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1 \
-        and "TokenDispatcherWithAllGather" not in existing_dispatchers:
-        _register_token_dispatcher(TokenDispatcherWithAllGather(**kwargs))
-    elif ep_size < 16 and "TokenDispatcherWithAll2AllV" not in existing_dispatchers:
-        _register_token_dispatcher(TokenDispatcherWithAll2AllV(**kwargs))
-    elif ep_size >= 16:
-        if "TokenDispatcherWithAll2AllV" not in existing_dispatchers:
-            _register_token_dispatcher(TokenDispatcherWithAll2AllV(**kwargs))
-        if "TokenDispatcherWithMC2" not in existing_dispatchers:
-            _register_token_dispatcher(TokenDispatcherWithMC2(**kwargs))
 
 
 class MoETokenDispatcher(ABC):

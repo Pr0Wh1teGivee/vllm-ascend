@@ -21,7 +21,6 @@ import torch_npu
 from torch.nn.functional import pad
 from vllm.forward_context import get_forward_context
 
-from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.utils import dispose_tensor, is_310p
 
 
