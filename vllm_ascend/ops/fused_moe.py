@@ -195,35 +195,6 @@ class AscendFusedMoE(FusedMoE):
         AscendFusedMoE.moe_counter += 1
         self.moe_instance_id = AscendFusedMoE.moe_counter
 
-        if params_dtype is None:
-            params_dtype = torch.get_default_dtype()
-
-        vllm_config = get_current_vllm_config()
-
-        self.moe_parallel_config = FusedMoEParallelConfig.make(
-            tp_size_=(tp_size if tp_size is not None else
-                      get_tensor_model_parallel_world_size()),
-            dp_size_=(dp_size
-                      if dp_size is not None else get_dp_group().world_size),
-            vllm_parallel_config=vllm_config.parallel_config)
-
-        self.top_k = top_k
-        self.num_experts = num_experts
-        self.global_num_experts = num_experts
-        assert intermediate_size % self.tp_size == 0
-        self.intermediate_size_per_partition = intermediate_size // self.tp_size
-        self.reduce_results = reduce_results
-        self.renormalize = renormalize
-        self.use_grouped_topk = use_grouped_topk
-        if self.use_grouped_topk:
-            assert num_expert_group is not None and topk_group is not None
-        self.num_expert_group = num_expert_group
-        self.topk_group = topk_group
-        self.custom_routing_function = custom_routing_function
-        self.scoring_func = scoring_func
-        self.e_score_correction_bias = e_score_correction_bias
-        self.expert_map = None
-        self.activation = activation
         self.log2phy = None
         self.global_redundant_expert_num = 0
 
@@ -256,48 +227,12 @@ class AscendFusedMoE(FusedMoE):
 
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
-        if self.scoring_func != "softmax" and not self.use_grouped_topk:
-            raise ValueError("Only softmax scoring function is supported for "
-                             "non-grouped topk.")
-        moe = FusedMoEConfig.make(
-            num_experts=self.global_num_experts,
-            experts_per_token=top_k,
-            hidden_dim=hidden_size,
-            num_local_experts=self.local_num_experts,
-            moe_parallel_config=self.moe_parallel_config,
-            # TODO (bnell): this needs to be fixed for quantized types.
-            in_dtype=params_dtype,
-            quant_config=quant_config)
-
-        self.moe_config = moe
-
         if quant_config is None:
-            self.quant_method = AscendUnquantizedFusedMoEMethod(moe)
+            self.quant_method = AscendUnquantizedFusedMoEMethod(self.moe_config)
         else:
             self.quant_method = quant_config.get_quant_method(self, prefix)
 
         assert self.quant_method is not None
-
-        local_num_experts = torch.sum(self.expert_map != -1) \
-            if self.expert_map is not None else num_experts
-
-        moe_quant_params = {
-            "num_experts": local_num_experts,
-            "hidden_size": hidden_size,
-            "intermediate_size_per_partition":
-            self.intermediate_size_per_partition,
-            "params_dtype": params_dtype,
-            "weight_loader": self.weight_loader,
-        }
-        # need full intermediate size pre-sharding for WNA16 act order
-        if (self.quant_method.__class__.__name__
-                in ("GPTQMarlinMoEMethod", "CompressedTensorsWNA16MoEMethod")):
-            moe_quant_params["intermediate_size_full"] = intermediate_size
-
-        self.ep_group = get_ep_group()
-        # NOTE: self.tp_group is not expert_tp_group
-        self.tp_group = get_tp_group().device_group
-        self.quant_method.create_weights(layer=self, **moe_quant_params)
 
         self.moe_config.tp_group = get_tp_group()
         self.moe_config.dp_group = get_dp_group()
@@ -312,22 +247,6 @@ class AscendFusedMoE(FusedMoE):
             setattr(
                 self, method.__name__.lower(),
                 method(moe_config=self.moe_config))  # type: ignore[abstract]
-
-    def naive_multicast(self, x: torch.Tensor,
-                        cu_tokens_across_dp_cpu: torch.Tensor):
-        assert (len(x.shape) == 2)
-        buffer = torch.empty((cu_tokens_across_dp_cpu[-1], x.size(1)),
-                             device=x.device,
-                             dtype=x.dtype)
-        start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_cpu[
-            self.dp_rank - 1]
-        end = cu_tokens_across_dp_cpu[self.dp_rank]
-        buffer[start:end, :].copy_(x)
-        for idx in range(self.dp_size):
-            start = 0 if idx == 0 else cu_tokens_across_dp_cpu[idx - 1]
-            end = cu_tokens_across_dp_cpu[idx]
-            get_dp_group().broadcast(buffer[start:end, :], idx)
-        return buffer
 
     def forward(self,
                 hidden_states: torch.Tensor,
@@ -367,9 +286,6 @@ class AscendFusedMoE(FusedMoE):
 
         moe_comm_method_name = forward_context.moe_comm_method_name
 
-        # print("moe_comm_method = ", moe_comm_method_name)
-        # moe_comm_method = "allgathercommimpl"
-        print("moe_comm_method = ", moe_comm_method_name)
         forward_context.moe_comm_method = getattr(self, moe_comm_method_name)
 
         hidden_states, router_logits = forward_context.moe_comm_method.prepare(

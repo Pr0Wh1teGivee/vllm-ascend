@@ -26,7 +26,7 @@ import vllm_ascend.ops.moe.token_dispatcher as token_dispatcher_module
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import (FusedMoEState,
                                                 _get_fused_moe_state)
-from vllm_ascend.ops.fused_moe import (AscendFusedMoE,
+from vllm_ascend.ops.common_fused_moe import (AscendFusedMoE,
                                        AscendUnquantizedFusedMoEMethod)
 from vllm_ascend.ops.moe.experts_selector import select_experts
 from vllm_ascend.ops.moe.moe_mlp import cumsum_group_list, unified_apply_mlp

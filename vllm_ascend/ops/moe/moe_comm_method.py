@@ -28,7 +28,8 @@ from vllm_ascend.ops.moe.fused_moe_prepare_and_finalize import (
 from vllm_ascend.ops.moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.moe.token_dispatcher import (TokenDispatcherWithAll2AllV,
                                                   TokenDispatcherWithAllGather,
-                                                  TokenDispatcherWithMC2)
+                                                  TokenDispatcherWithMC2, TokenDispatcherMoge)
+from vllm_ascend.utils import is_310p
 
 
 class MoECommMethod(ABC):
@@ -166,6 +167,12 @@ class AllGatherCommImpl(MoECommMethod):
     """
 
     def _get_token_dispatcher(self):
+        if is_310p():
+            return TokenDispatcherMoge(
+                top_k=self.moe_config.experts_per_token,
+                num_experts=self.moe_config.num_experts,
+                num_local_experts=self.moe_config.num_local_experts
+            )
         return TokenDispatcherWithAllGather(
             top_k=self.moe_config.experts_per_token,
             num_experts=self.moe_config.num_experts,
@@ -173,85 +180,6 @@ class AllGatherCommImpl(MoECommMethod):
 
     def _get_fused_moe_prepare_finalize(self):
         return FusedMoEPrepareAndFinalizeWithAllGather(self.moe_config)
-
-
-class NativeAllGatherCommImpl(AllGatherCommImpl):
-    """This implementation should be compatible with all scenarios.
-
-    Note that this implementation purely consists of native PyTorch ops
-    and does not use any NPU-specific ops. So the performance may not be optimal.
-    But it is a good fallback for scenarios where NPU-specific ops are not available.
-    """
-
-    def permute(
-        self,
-        hidden_states: torch.Tensor,
-        topk_ids: torch.Tensor,
-        topk_weights: torch.Tensor,
-        expert_map: torch.Tensor,
-        num_experts: int,
-        apply_a8_quantization: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], int]:
-        num_tokens = hidden_states.shape[0]
-
-        # Generate token indices and flatten
-        token_indices = torch.arange(num_tokens,
-                                     device=hidden_states.device,
-                                     dtype=torch.int64)
-        token_indices = (token_indices.unsqueeze(1).expand(
-            -1, self.moe_config.experts_per_token).reshape(-1))
-
-        # Flatten token-to-expert mappings and map to local experts
-        weights_flat = topk_weights.view(-1)
-        experts_flat = topk_ids.view(-1)
-        local_experts_flat = (expert_map[experts_flat]
-                              if expert_map is not None else experts_flat)
-
-        # Filter valid token-expert pairs
-        mask = local_experts_flat != -1
-        # FIXME: npu_grouped_matmul output random values at [num_valid_tokens:, ...]
-        # So we need to filter out invalid tokens by zeroing their weights.
-        # This is a workaround and should be removed after the issue is fixed
-        filtered_weights = torch.where(mask, weights_flat,
-                                       torch.zeros_like(weights_flat)).to(
-                                           topk_weights.dtype)
-        filtered_experts = torch.where(
-            mask,
-            local_experts_flat,
-            torch.full_like(local_experts_flat, num_experts),
-        ).to(topk_ids.dtype)
-
-        # Sort by local expert IDs
-        sort_indices = torch.argsort(filtered_experts.view(torch.float32))
-        self.sorted_token_indices = token_indices[sort_indices]
-        self.sorted_weights = filtered_weights[sort_indices]
-
-        # Compute token counts with minlength of num_experts
-        # This is equivalent to but faster than:
-        # >>> token_counts = torch.bincount(filtered_experts, minlength=num_experts)[:-1]
-        token_counts = torch.zeros(num_experts + 1,
-                                   device=hidden_states.device,
-                                   dtype=torch.int64)
-        ones = torch.ones_like(filtered_experts, dtype=torch.int64)
-        token_counts.scatter_add_(0, filtered_experts.to(torch.int64), ones)
-        expert_tokens = token_counts[:num_experts]
-
-        # Rearrange hidden_states
-        permuted_hidden_states = hidden_states[self.sorted_token_indices]
-
-        group_list_type = 1  # `count` mode
-
-        return permuted_hidden_states, expert_tokens, None, group_list_type
-
-    def unpermute(self, mlp_output: torch.Tensor,
-                  hidden_states: torch.Tensor) -> None:
-        mlp_output = mlp_output * self.sorted_weights.unsqueeze(1)
-
-        final_hidden_states = torch.zeros_like(hidden_states)
-        final_hidden_states.index_add_(0, self.sorted_token_indices,
-                                       mlp_output)
-
-        hidden_states[:] = final_hidden_states
 
 
 class MC2CommImpl(MoECommMethod):
