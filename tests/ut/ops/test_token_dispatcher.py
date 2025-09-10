@@ -23,8 +23,7 @@ from tests.ut.base import TestBase
 
 from vllm_ascend.ops.moe.token_dispatcher import (  # isort: skip
     AscendSocVersion, TokenDispatcherWithAll2AllV,
-    TokenDispatcherWithAllGather, TokenDispatcherWithMC2, _Dispatchers,
-    _register_token_dispatcher, get_token_dispatcher, setup_token_dispatchers)
+    TokenDispatcherWithAllGather, TokenDispatcherWithMC2)
 
 
 class TestTokenDispatcherWithMC2(TestBase):
