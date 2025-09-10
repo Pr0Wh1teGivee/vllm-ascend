@@ -1531,6 +1531,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         Returns:
             str: The selected MoE communication method, either "allgather", "mc2", or "alltoall".
         """
+        model_type = self.vllm_config.model_config.hf_config.model_type
         soc_version = get_ascend_soc_version()
 
         if not self.parallel_config.enable_expert_parallel:
@@ -1547,6 +1548,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         if moe_comm_method == "allgather" and with_prefill:
             moe_comm_method = "naivemulticast"
+
+        if model_type == "PanguProMoE":
+            moe_comm_method == "allgather"
 
         if is_global_first_rank():
             logger.debug(f"num_tokens: {num_tokens}, "
