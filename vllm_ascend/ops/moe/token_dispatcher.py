@@ -377,7 +377,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
 
 
 # mypy: disable-error-code="override"
-class UnquantizedTokenDispatcherWithFusedExpertsMoge(MoETokenDispatcher):
+class TokenDispatcherMoge(MoETokenDispatcher):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
