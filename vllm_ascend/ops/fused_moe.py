@@ -20,7 +20,7 @@ from typing import Any, Callable, Optional
 
 import torch
 import torch_npu
-from vllm.config import get_current_vllm_config
+from vllm.config import CompilationLevel, get_current_vllm_config
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
@@ -28,8 +28,6 @@ from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import \
     FusedMoEConfig  # isort: skip
-from vllm.model_executor.layers.fused_moe.config import \
-    FusedMoEParallelConfig  # isort: skip
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map)
 from vllm.model_executor.layers.quantization.base_config import \
@@ -55,19 +53,33 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         super().__init__(moe=moe)
         vllm_config = get_current_vllm_config()
 
-        self.global_batch_size = vllm_config.scheduler_config.max_num_seqs
-        self.max_model_len = vllm_config.model_config.max_model_len
-        get_ascend_config()
+        # self.global_batch_size = vllm_config.scheduler_config.max_num_seqs
+        # self.max_model_len = vllm_config.model_config.max_model_len
+        # get_ascend_config()
 
-        try:
-            device_group = get_mc2_group().device_group
-            # TODO: Try local_rank = ep_group.rank_in_group
-            local_rank = torch.distributed.get_rank(group=device_group)
-            backend = device_group._get_backend(torch.device("npu"))
-            self.moe_all_to_all_group_name = backend.get_hccl_comm_name(
-                local_rank)
-        except AttributeError:
-            self.moe_all_to_all_group_name = None
+        # try:
+        #     device_group = get_mc2_group().device_group
+        #     # TODO: Try local_rank = ep_group.rank_in_group
+        #     local_rank = torch.distributed.get_rank(group=device_group)
+        #     backend = device_group._get_backend(torch.device("npu"))
+        #     self.moe_all_to_all_group_name = backend.get_hccl_comm_name(
+        #         local_rank)
+        # except AttributeError:
+        #     self.moe_all_to_all_group_name = None
+
+        # NOTE: Currently, this self.use_aclgraph is only used in
+        # UnquantizedFusedMoEMethod.forward_oot to decide whether to use in
+        # ops/fused_moe.py:568 to circumvent torch.randint_like not supported issue.
+        # Once torch.randint_like is supported or removed, this flag can be removed.
+        vllm_config = get_current_vllm_config()
+        ascend_config = get_ascend_config()
+        if ascend_config.torchair_graph_config.enabled:
+            self.use_aclgraph = False
+        else:
+            self.use_aclgraph = (vllm_config.compilation_config.level
+                                 == CompilationLevel.PIECEWISE and
+                                 not vllm_config.model_config.enforce_eager)
+        self.transpose = True
 
     def process_weights_after_loading(self, layer):
         super(UnquantizedFusedMoEMethod,
@@ -228,7 +240,8 @@ class AscendFusedMoE(FusedMoE):
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
         if quant_config is None:
-            self.quant_method = AscendUnquantizedFusedMoEMethod(self.moe_config)
+            self.quant_method = AscendUnquantizedFusedMoEMethod(
+                self.moe_config)
         else:
             self.quant_method = quant_config.get_quant_method(self, prefix)
 

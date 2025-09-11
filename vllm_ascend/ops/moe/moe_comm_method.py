@@ -26,10 +26,10 @@ from vllm_ascend.ops.moe.fused_moe_prepare_and_finalize import (
     FusedMoEPrepareAndFinalizeWithAllGather, FusedMoEPrepareAndFinalizeWithMC2,
     FusedMoEPrepareAndFinalizeWithNaiveMulticast)
 from vllm_ascend.ops.moe.moe_mlp import unified_apply_mlp
-from vllm_ascend.ops.moe.token_dispatcher import (TokenDispatcherWithAll2AllV,
+from vllm_ascend.ops.moe.token_dispatcher import (TokenDispatcherMoge,
+                                                  TokenDispatcherWithAll2AllV,
                                                   TokenDispatcherWithAllGather,
-                                                  TokenDispatcherWithMC2, TokenDispatcherMoge)
-from vllm_ascend.utils import is_310p
+                                                  TokenDispatcherWithMC2)
 
 
 class MoECommMethod(ABC):
@@ -113,8 +113,8 @@ class MoECommMethod(ABC):
             apply_router_weight_on_input=apply_router_weight_on_input,
             with_quant=use_int8_w8a8 or use_int4_w4a8)
 
-        permuted_hidden_states, expert_tokens, dynamic_scale, group_list_type = \
-            results["hidden_states"], results["group_list"], results.get("dynamic_scale"), results["group_list_type"]
+        permuted_hidden_states, expert_tokens, dynamic_scale, group_list_type, topk_scales = \
+            results["hidden_states"], results["group_list"], results.get("dynamic_scale"), results["group_list_type"], results.get("topk_scales")
 
         mlp_output = unified_apply_mlp(hidden_states=permuted_hidden_states,
                                        w1=w1,
@@ -126,6 +126,7 @@ class MoECommMethod(ABC):
                                        group_list_type=group_list_type,
                                        w1_scale_bias=w1_scale_bias,
                                        w2_scale_bias=w2_scale_bias,
+                                       topk_scales=topk_scales,
                                        with_quant=use_int8_w8a8
                                        or use_int4_w4a8,
                                        fusion=use_int8_w8a8,
@@ -167,12 +168,6 @@ class AllGatherCommImpl(MoECommMethod):
     """
 
     def _get_token_dispatcher(self):
-        if is_310p():
-            return TokenDispatcherMoge(
-                top_k=self.moe_config.experts_per_token,
-                num_experts=self.moe_config.num_experts,
-                num_local_experts=self.moe_config.num_local_experts
-            )
         return TokenDispatcherWithAllGather(
             top_k=self.moe_config.experts_per_token,
             num_experts=self.moe_config.num_experts,
