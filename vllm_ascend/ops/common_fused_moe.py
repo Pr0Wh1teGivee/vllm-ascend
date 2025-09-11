@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 import os
-from typing import Callable, Optional, Any
+from typing import Any, Callable, Optional
 
 import torch
 import torch_npu
@@ -27,6 +27,8 @@ from vllm.model_executor.layers.fused_moe.config import \
     FusedMoEConfig  # isort: skip
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map)
+from vllm.model_executor.layers.quantization.base_config import \
+    QuantizationConfig
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_mc2_group
@@ -35,7 +37,9 @@ from vllm_ascend.ops.moe.experts_selector import select_experts
 from vllm_ascend.ops.moe.moe_comm_method import (AllGatherCommImpl,
                                                  AlltoAllCommImpl, MC2CommImpl,
                                                  NaiveMulticastCommImpl)
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p, get_rm_router_logits_state, get_all_reduce_merge_state
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ,
+                               get_all_reduce_merge_state,
+                               get_rm_router_logits_state, is_310p)
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -54,16 +58,18 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             self.use_aclgraph = False
         else:
             self.use_aclgraph = (vllm_config.compilation_config.level
-                                 == CompilationLevel.PIECEWISE
-                                 and not vllm_config.model_config.enforce_eager)
+                                 == CompilationLevel.PIECEWISE and
+                                 not vllm_config.model_config.enforce_eager)
         self.transpose = True
 
     def process_weights_after_loading(self, layer):
-        super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
+        super(UnquantizedFusedMoEMethod,
+              self).process_weights_after_loading(layer)
         if self.transpose:
             w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(
                 1, 2).contiguous()
-            layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
+            layer.w13_weight = torch.nn.Parameter(w13_data,
+                                                  requires_grad=False)
 
             w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(
                 1, 2).contiguous()
@@ -72,7 +78,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             self.transpose = False
         else:
             w13_data = self._maybe_pad_weight(layer.w13_weight.data)
-            layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
+            layer.w13_weight = torch.nn.Parameter(w13_data,
+                                                  requires_grad=False)
 
             w2_data = self._maybe_pad_weight(layer.w2_weight.data)
             layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
@@ -83,26 +90,25 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             layer.w2_weight.data = torch_npu.npu_format_cast(
                 layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
 
-    def apply(
-            self,
-            layer: torch.nn.Module,
-            x: torch.Tensor,
-            use_grouped_topk: bool,
-            top_k: int,
-            router_logits: torch.Tensor,
-            renormalize: bool,
-            topk_group: Optional[int] = None,
-            num_expert_group: Optional[int] = None,
-            custom_routing_function: Optional[Callable] = None,
-            scoring_func: str = "softmax",
-            routed_scaling_factor: float = 1.0,
-            e_score_correction_bias: Optional[torch.Tensor] = None,
-            global_num_experts: int = -1,
-            expert_map: Optional[torch.Tensor] = None,
-            apply_router_weight_on_input: bool = False,
-            enable_force_load_balance: bool = False,
-            shared_experts: Optional[Any] = None,
-            **kwargs) -> torch.Tensor:
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              use_grouped_topk: bool,
+              top_k: int,
+              router_logits: torch.Tensor,
+              renormalize: bool,
+              topk_group: Optional[int] = None,
+              num_expert_group: Optional[int] = None,
+              custom_routing_function: Optional[Callable] = None,
+              scoring_func: str = "softmax",
+              routed_scaling_factor: float = 1.0,
+              e_score_correction_bias: Optional[torch.Tensor] = None,
+              global_num_experts: int = -1,
+              expert_map: Optional[torch.Tensor] = None,
+              apply_router_weight_on_input: bool = False,
+              enable_force_load_balance: bool = False,
+              shared_experts: Optional[Any] = None,
+              **kwargs) -> torch.Tensor:
 
         topk_weights, topk_ids, row_idx = select_experts(
             hidden_states=x,
@@ -124,18 +130,17 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         if enable_force_load_balance and not self.use_aclgraph:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
-
         moe_comm_method = get_forward_context().moe_comm_method
-        return moe_comm_method.fused_experts(hidden_states=x,
-                                             w1=layer.w13_weight,
-                                             w2=layer.w2_weight,
-                                             topk_weights=topk_weights,
-                                             topk_ids=topk_ids,
-                                             row_idx=row_idx,
-                                             global_num_experts=global_num_experts,
-                                             expert_map=expert_map,
-                                             shared_experts=shared_experts,
-                                             need_trans=True)
+        return moe_comm_method.fused_experts(
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            row_idx=row_idx,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+            shared_experts=shared_experts)
 
 
 class AscendFusedMoE(FusedMoE):
@@ -145,60 +150,61 @@ class AscendFusedMoE(FusedMoE):
 
     def __init__(
         self,
-        num_experts,
-        top_k,
-        hidden_size,
-        intermediate_size,
-        params_dtype=None,
-        reduce_results=False,
-        renormalize=True,
-        use_grouped_topk=False,
-        num_expert_group=None,
-        topk_group=None,
-        quant_config=None,
-        tp_size=None,
-        ep_size=None,
-        dp_size=None,
-        prefix="",
-        custom_routing_function=None,
-        scoring_func="softmax",
+        num_experts: int,  # Global number of experts
+        top_k: int,
+        hidden_size: int,
+        intermediate_size: int,
+        params_dtype: Optional[torch.dtype] = None,
+        reduce_results: bool = False,
+        renormalize: bool = True,
+        use_grouped_topk: bool = False,
+        num_expert_group: Optional[int] = None,
+        topk_group: Optional[int] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        tp_size: Optional[int] = None,
+        ep_size: Optional[int] = None,
+        dp_size: Optional[int] = None,
+        prefix: str = "",
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
-        e_score_correction_bias=None,
-        apply_router_weight_on_input=False,
-        activation="silu",
-        enable_eplb=False,
-        num_redundant_experts=0,
-        has_bias=False,
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
+        activation: str = "silu",
+        enable_eplb: bool = False,
+        num_redundant_experts: int = 0,
+        has_bias: bool = False,
     ):
         super().__init__(
-            num_experts,
-            top_k,
-            hidden_size,
-            intermediate_size,
-            params_dtype,
-            reduce_results,
-            renormalize,
-            use_grouped_topk,
-            num_expert_group,
-            topk_group,
-            quant_config,
-            tp_size,
-            ep_size,
-            dp_size,
-            prefix,
-            custom_routing_function,
-            scoring_func,
-            routed_scaling_factor,
-            e_score_correction_bias,
-            apply_router_weight_on_input,
-            activation,
-            enable_eplb,
-            num_redundant_experts,
-            has_bias,
+            num_experts=num_experts,
+            top_k=top_k,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            params_dtype=params_dtype,
+            reduce_results=reduce_results,
+            renormalize=renormalize,
+            use_grouped_topk=use_grouped_topk,
+            num_expert_group=num_expert_group,
+            topk_group=topk_group,
+            quant_config=quant_config,
+            tp_size=tp_size,
+            ep_size=ep_size,
+            dp_size=dp_size,
+            prefix=prefix,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
+            e_score_correction_bias=e_score_correction_bias,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            activation=activation,
+            enable_eplb=enable_eplb,
+            num_redundant_experts=num_redundant_experts,
+            has_bias=has_bias,
         )
         AscendFusedMoE.moe_counter += 1
         self.moe_instance_id = AscendFusedMoE.moe_counter
 
+        self.expert_map = None
         self.log2phy = None
         self.global_redundant_expert_num = 0
 
@@ -232,7 +238,8 @@ class AscendFusedMoE(FusedMoE):
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
         if quant_config is None:
-            self.quant_method = AscendUnquantizedFusedMoEMethod(self.moe_config)
+            self.quant_method = AscendUnquantizedFusedMoEMethod(
+                self.moe_config)
         else:
             self.quant_method = quant_config.get_quant_method(self, prefix)
 
@@ -245,13 +252,12 @@ class AscendFusedMoE(FusedMoE):
         self.moe_config.num_global_redundant_experts = self.global_redundant_expert_num
 
         for method in {
-            AllGatherCommImpl, AlltoAllCommImpl, MC2CommImpl,
-            NaiveMulticastCommImpl
+                AllGatherCommImpl, AlltoAllCommImpl, MC2CommImpl,
+                NaiveMulticastCommImpl
         }:
             setattr(
                 self, method.__name__.lower(),
                 method(moe_config=self.moe_config))  # type: ignore[abstract]
-
 
     def maybe_all_reduce_tensor_model_parallel(
             self, final_hidden_states: torch.Tensor):
