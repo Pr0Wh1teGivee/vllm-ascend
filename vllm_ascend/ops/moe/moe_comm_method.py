@@ -18,6 +18,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Optional
 
 import torch
+from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
@@ -36,6 +37,8 @@ class MoECommMethod(ABC):
     """Base class for MoE communication methods."""
 
     def __init__(self, moe_config: FusedMoEConfig):
+        self.model_type = get_current_vllm_config(
+        ).model_config.hf_config.model_type
         self.moe_config = moe_config
         self.mc2_mask = None
 
@@ -168,10 +171,16 @@ class AllGatherCommImpl(MoECommMethod):
     """
 
     def _get_token_dispatcher(self):
-        return TokenDispatcherWithAllGather(
-            top_k=self.moe_config.experts_per_token,
-            num_experts=self.moe_config.num_experts,
-            num_local_experts=self.moe_config.num_local_experts)
+        if self.model_type == "PanguProMoE":
+            return TokenDispatcherMoge(
+                top_k=self.moe_config.experts_per_token,
+                num_experts=self.moe_config.num_experts,
+                num_local_experts=self.moe_config.num_local_experts)
+        else:
+            return TokenDispatcherWithAllGather(
+                top_k=self.moe_config.experts_per_token,
+                num_experts=self.moe_config.num_experts,
+                num_local_experts=self.moe_config.num_local_experts)
 
     def _get_fused_moe_prepare_finalize(self):
         return FusedMoEPrepareAndFinalizeWithAllGather(self.moe_config)
