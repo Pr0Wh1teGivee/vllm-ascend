@@ -36,10 +36,7 @@ from vllm_ascend.eplb.core.eplb_utils import (determine_default_expert_map,
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.ops.moe.experts_selector import select_experts
 from vllm_ascend.ops.moe.moe_comm_method import setup_moe_comm_method
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ,
-                               get_all_reduce_merge_state,
-                               get_rm_router_logits_state, is_310p,
-                               npu_stream_switch)
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p, npu_stream_switch
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -129,6 +126,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
+        enable_force_load_balance = get_forward_context().in_profile_run
         if enable_force_load_balance and not self.use_aclgraph:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
@@ -159,10 +157,6 @@ class AscendFusedMoE(FusedMoE):
         self.expert_map = None
         self.log2phy = None
         self.global_redundant_expert_num = 0
-
-        is_deepseek_v3_r1 = self.global_num_experts == 256
-        self.rm_router_logits = get_rm_router_logits_state(
-            self.moe_parallel_config.ep_size, self.dp_size, is_deepseek_v3_r1)
 
         if self.quant_config is None:
             self.quant_method = AscendUnquantizedFusedMoEMethod(
@@ -260,8 +254,7 @@ class AscendFusedMoE(FusedMoE):
             hidden_states=hidden_states,
             router_logits=router_logits,
             replace_allreduce=forward_context.sp_enabled,
-            enable_shared_expert_dp=self.enable_shared_expert_dp,
-            rm_router_logits=self.rm_router_logits)
+            enable_shared_expert_dp=self.enable_shared_expert_dp)
 
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
@@ -299,6 +292,35 @@ class AscendFusedMoE(FusedMoE):
             reduce_results=self.reduce_results)
 
         return final_hidden_states
+
+    def _forward_ms_fused_moe_comp(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        is_prefill: bool,
+        real_top_k,
+        enable_force_load_balance: bool = False,
+    ):
+        hidden_states = self.quant_method.apply(
+            layer=self,
+            x=hidden_states,
+            router_logits=router_logits,
+            top_k=real_top_k,
+            renormalize=self.renormalize,
+            use_grouped_topk=self.use_grouped_topk,
+            global_num_experts=self.global_num_experts,
+            expert_map=self.expert_map,
+            topk_group=self.topk_group,
+            num_expert_group=self.num_expert_group,
+            custom_routing_function=self.custom_routing_function,
+            scoring_func=self.scoring_func,
+            e_score_correction_bias=self.e_score_correction_bias,
+            is_prefill=is_prefill,
+            enable_force_load_balance=enable_force_load_balance,
+        )
+
+        return hidden_states
+
     def transpose_weight(self, loaded_weight, expert_data, shard_dim):
         # Ensure training and inference weight shapes match during RL weight updates
         if (
