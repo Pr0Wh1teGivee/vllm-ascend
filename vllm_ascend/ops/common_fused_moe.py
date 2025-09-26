@@ -126,7 +126,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
-        enable_force_load_balance = get_forward_context().in_profile_run
         if enable_force_load_balance and not self.use_aclgraph:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
@@ -141,7 +140,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             global_num_experts=global_num_experts,
             expert_map=expert_map,
             shared_experts=shared_experts,
-            apply_router_weight_on_input=apply_router_weight_on_input)
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            dynamic_eplb=self.dynamic_eplb)
 
 
 class AscendFusedMoE(FusedMoE):
@@ -292,34 +292,6 @@ class AscendFusedMoE(FusedMoE):
             reduce_results=self.reduce_results)
 
         return final_hidden_states
-
-    def _forward_ms_fused_moe_comp(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-        is_prefill: bool,
-        real_top_k,
-        enable_force_load_balance: bool = False,
-    ):
-        hidden_states = self.quant_method.apply(
-            layer=self,
-            x=hidden_states,
-            router_logits=router_logits,
-            top_k=real_top_k,
-            renormalize=self.renormalize,
-            use_grouped_topk=self.use_grouped_topk,
-            global_num_experts=self.global_num_experts,
-            expert_map=self.expert_map,
-            topk_group=self.topk_group,
-            num_expert_group=self.num_expert_group,
-            custom_routing_function=self.custom_routing_function,
-            scoring_func=self.scoring_func,
-            e_score_correction_bias=self.e_score_correction_bias,
-            is_prefill=is_prefill,
-            enable_force_load_balance=enable_force_load_balance,
-        )
-
-        return hidden_states
 
     def transpose_weight(self, loaded_weight, expert_data, shard_dim):
         # Ensure training and inference weight shapes match during RL weight updates
