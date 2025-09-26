@@ -45,8 +45,8 @@ class FusedMoEPrepareAndFinalize(ABC):
         self.moe_config = moe_config
         is_deepseek_v3_r1 = self.moe_config.num_experts == 256
         self.rm_router_logits = get_rm_router_logits_state(
-            self.moe_config.moe_parallel_config.ep_size,
-            self.moe_config.moe_parallel_config.dp_size, is_deepseek_v3_r1)
+            self.moe_config.ep_size, self.moe_config.dp_size,
+            is_deepseek_v3_r1)
 
     @abstractmethod
     def prepare(self,
