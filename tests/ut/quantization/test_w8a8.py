@@ -5,13 +5,14 @@ import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.ops.layers.experts_selector import (_native_grouped_topk,
-                                                     select_experts)
+from vllm_ascend.ops.fused_moe.experts_selector import (_native_grouped_topk,
+                                                        select_experts)
 from vllm_ascend.quantization.w8a8 import (AscendC8KVCacheMethod,
                                            AscendW8A8FusedMoEMethod,
                                            AscendW8A8LinearMethod,
                                            fused_experts, fused_experts_310p,
                                            quant_per_tensor)
+from vllm_ascend.utils import AscendDeviceType
 
 
 class TestQuantPerTensor(TestBase):
@@ -68,15 +69,22 @@ class TestAscendW8A8LinearMethod(TestBase):
         self.assertEqual(params['weight_scale'].shape, (10, 1))
         self.assertEqual(params['weight_offset'].shape, (10, 1))
 
+    @patch("vllm_ascend.quantization.w8a8.get_forward_context")
     @patch("vllm_ascend.quantization.w8a8.quant_per_tensor")
     @patch("torch_npu.npu_quant_matmul")
     def test_apply_with_x_not_int8(self, mock_npu_quant_matmul,
-                                   mock_quant_per_tensor):
+                                   mock_quant_per_tensor,
+                                   mock_get_forward_context):
         layer = MagicMock()
         layer.aclnn_input_scale = 0.1
         layer.aclnn_input_offset = 0.2
         layer.weight = torch.randn(128, 256)
         layer.deq_scale = 0.3
+
+        mock_forward_context = MagicMock()
+        mock_get_forward_context.return_value = mock_forward_context
+        mock_weight_prefetch_method = MagicMock()
+        mock_forward_context.weight_prefetch_method = mock_weight_prefetch_method
 
         x = torch.randn(32, 128)
         bias = torch.randn(256)
@@ -111,9 +119,11 @@ class TestAscendW8A8LinearMethod(TestBase):
         expected_y_output += bias
         self.assertTrue(torch.equal(output, expected_y_output))
 
-    @patch("vllm_ascend.quantization.w8a8.is_310p", return_value=True)
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._310P)
     @patch("torch_npu.npu_quant_matmul")
-    def test_apply_with_x_is_310p(self, mock_npu_quant_matmul, mock_is_310p):
+    def test_apply_with_x_is_310p(self, mock_npu_quant_matmul,
+                                  mock_soc_version):
         layer = MagicMock()
         layer.aclnn_input_scale = 0.1
         layer.aclnn_input_offset = 0.2
@@ -130,8 +140,10 @@ class TestAscendW8A8LinearMethod(TestBase):
         expected_y_output += bias
         self.assertTrue(torch.equal(output, expected_y_output))
 
+    @patch("vllm_ascend.quantization.w8a8.is_enable_nz")
     @patch('torch_npu.npu_format_cast')
-    def test_process_weights_after_loading(self, mock_npu_format_cast):
+    def test_process_weights_after_loading_not_nz(self, mock_npu_format_cast,
+                                                  mock_is_nz):
         layer = MagicMock()
 
         layer.weight.data = torch.randn(128, 256)
@@ -141,6 +153,7 @@ class TestAscendW8A8LinearMethod(TestBase):
         layer.weight_scale.data = torch.randn(128, 1)
         layer.weight_offset.data = torch.randn(128, 1)
 
+        mock_is_nz.return_value = 0
         mock_npu_format_cast.return_value = MagicMock
         self.method.process_weights_after_loading(layer)
 
@@ -153,6 +166,35 @@ class TestAscendW8A8LinearMethod(TestBase):
 
         self.assertEqual(layer.weight_scale.data.shape, (128, ))
         self.assertEqual(layer.weight_offset.data.shape, (128, ))
+        mock_npu_format_cast.assert_not_called()
+
+    @patch("vllm_ascend.quantization.w8a8.is_enable_nz")
+    @patch('torch_npu.npu_format_cast')
+    def test_process_weights_after_loading_nz(self, mock_npu_format_cast,
+                                              mock_is_nz):
+        layer = MagicMock()
+
+        layer.weight.data = torch.randn(128, 256)
+        layer.input_scale.data = torch.tensor([0.1])
+        layer.input_offset.data = torch.tensor([0])
+        layer.deq_scale = torch.tensor([0.5])
+        layer.weight_scale.data = torch.randn(128, 1)
+        layer.weight_offset.data = torch.randn(128, 1)
+
+        mock_is_nz.return_value = 1
+        mock_npu_format_cast.return_value = MagicMock
+        self.method.process_weights_after_loading(layer)
+
+        expected_offset = torch.tensor([0]).repeat(256).to(torch.int8)
+        self.assertTrue(
+            torch.equal(layer.aclnn_input_offset.data, expected_offset))
+        self.assertFalse(layer.aclnn_input_offset.requires_grad)
+
+        self.assertFalse(layer.deq_scale.requires_grad)
+
+        self.assertEqual(layer.weight_scale.data.shape, (128, ))
+        self.assertEqual(layer.weight_offset.data.shape, (128, ))
+        mock_npu_format_cast.assert_called_once()
 
 
 class TestAscendW8A8FusedMoEMethod(TestBase):
@@ -240,11 +282,12 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         mock_fused_experts.assert_called_once()
         self.assertEqual(result.shape, (32, self.hidden_size))
 
-    @patch("vllm_ascend.quantization.w8a8.is_310p", return_value=True)
+    @patch('vllm_ascend.quantization.w8a8.get_ascend_device_type',
+           return_value=AscendDeviceType._310P)
     @patch('vllm_ascend.quantization.w8a8.select_experts')
     @patch('vllm_ascend.quantization.w8a8.fused_experts_310p')
     def test_apply_is_310p(self, mock_fused_experts_310p, mock_select_experts,
-                           mock_is_310p):
+                           mock_soc_version):
         # Setup
         mock_layer = MagicMock()
         x = torch.randn(32, self.hidden_size)
@@ -287,7 +330,6 @@ class TestAscendC8KVCacheMethod(TestBase):
         self.attention_type.ENCODER = "encoder"
 
     def test_create_weights(self):
-        """测试 create_weights 是否正确注册参数"""
         AscendC8KVCacheMethod.create_weights(self.layer)
 
         self.layer.register_parameter.assert_any_call("key_antiquant_scale",
@@ -304,8 +346,9 @@ class TestAscendC8KVCacheMethod(TestBase):
             expected_shape = (self.layer.num_kv_heads * self.layer.head_size, )
             self.assertEqual(param.shape, expected_shape)
 
-    @patch("vllm_ascend.quantization.w8a8.is_310p", return_value=False)
-    def test_process_weights_after_loading_not_310p(self, mock_is_310p):
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._910_93)
+    def test_process_weights_after_loading_not_310p(self, mock_soc_version):
         key_data = torch.ones(4 * 64)
         value_data = torch.ones(4 * 64) * 2
 
@@ -318,8 +361,9 @@ class TestAscendC8KVCacheMethod(TestBase):
         self.assertTrue(torch.all(self.method.antiquant_scale_comb[0] == 1))
         self.assertTrue(torch.all(self.method.antiquant_scale_comb[1] == 2))
 
-    @patch("vllm_ascend.quantization.w8a8.is_310p", return_value=True)
-    def test_process_weights_after_loading_is_310p(self, mock_is_310p):
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._310P)
+    def test_process_weights_after_loading_is_310p(self, mock_soc_version):
         key_data = torch.ones(4 * 64)
         value_data = torch.ones(4 * 64) * 2
 
@@ -715,16 +759,43 @@ class TestSelectExperts(TestBase):
 
         self.hidden_states = torch.randn(self.num_tokens, self.hidden_size)
         self.router_logits = torch.randn(self.num_tokens, self.num_experts)
+        """Mock custom routing"""
+        self.mock_custom_routing = MagicMock()
+        self.mock_custom_routing.return_value = (torch.ones(
+            self.num_tokens, self.top_k),
+                                                 torch.zeros(
+                                                     self.num_tokens,
+                                                     self.top_k,
+                                                     dtype=torch.int32))
 
-    def test_softmax_scoring(self):
+        self.mock_ctx = MagicMock()
+        self.mock_ctx.weight_prefetch_method = MagicMock()
+        patcher = patch(
+            'vllm_ascend.ops.fused_moe.experts_selector.get_forward_context',
+            return_value=self.mock_ctx)
+        self.addCleanup(patcher.stop)
+        patcher.start()
+
+    @patch('torch_npu.npu_moe_gating_top_k')
+    def test_softmax_scoring(self, mock_topk):
         """Test softmax scoring function"""
+        mock_topk.return_value = (torch.ones(self.num_tokens, self.top_k),
+                                  torch.zeros(self.num_tokens,
+                                              self.top_k,
+                                              dtype=torch.long),
+                                  torch.arange(0,
+                                               self.num_tokens * self.top_k,
+                                               dtype=torch.int32).view(
+                                                   self.top_k,
+                                                   -1).permute(1,
+                                                               0).contiguous())
 
-        weights, ids, _ = select_experts(hidden_states=self.hidden_states,
-                                         router_logits=self.router_logits,
-                                         top_k=self.top_k,
-                                         use_grouped_topk=False,
-                                         renormalize=False,
-                                         scoring_func="softmax")
+        weights, ids = select_experts(hidden_states=self.hidden_states,
+                                      router_logits=self.router_logits,
+                                      top_k=self.top_k,
+                                      use_grouped_topk=False,
+                                      renormalize=False,
+                                      scoring_func="softmax")
 
         self.assertEqual(weights.shape, (self.num_tokens, self.top_k))
         self.assertEqual(ids.shape, (self.num_tokens, self.top_k))
@@ -732,12 +803,14 @@ class TestSelectExperts(TestBase):
     def test_sigmoid_scoring(self):
         """Test sigmoid scoring function"""
 
-        weights, ids, _ = select_experts(hidden_states=self.hidden_states,
-                                         router_logits=self.router_logits,
-                                         top_k=self.top_k,
-                                         use_grouped_topk=False,
-                                         renormalize=False,
-                                         scoring_func="sigmoid")
+        weights, ids = select_experts(
+            hidden_states=self.hidden_states,
+            router_logits=self.router_logits,
+            top_k=self.top_k,
+            use_grouped_topk=False,
+            renormalize=False,
+            scoring_func="sigmoid",
+            custom_routing_function=self.mock_custom_routing)
 
         self.assertEqual(weights.shape, (self.num_tokens, self.top_k))
         self.assertEqual(ids.shape, (self.num_tokens, self.top_k))
@@ -760,27 +833,27 @@ class TestSelectExperts(TestBase):
                                               self.top_k,
                                               dtype=torch.long))
 
-        weights, ids, _ = select_experts(hidden_states=self.hidden_states,
-                                         router_logits=self.router_logits,
-                                         top_k=self.top_k,
-                                         use_grouped_topk=True,
-                                         renormalize=False,
-                                         topk_group=4,
-                                         num_expert_group=2)
+        weights, ids = select_experts(hidden_states=self.hidden_states,
+                                      router_logits=self.router_logits,
+                                      top_k=self.top_k,
+                                      use_grouped_topk=True,
+                                      renormalize=False,
+                                      topk_group=4,
+                                      num_expert_group=2)
 
         mock_topk.assert_called()
         self.assertEqual(weights.shape, (self.num_tokens, self.top_k))
         self.assertEqual(ids.shape, (self.num_tokens, self.top_k))
         self.assertEqual(ids.dtype, torch.int32)
 
-    @patch('vllm_ascend.ops.layers.experts_selector._native_grouped_topk')
+    @patch('vllm_ascend.ops.fused_moe.experts_selector._native_grouped_topk')
     def test_grouped_topk_with_correction_bias(self, mock_grouped_topk):
         """Test grouped topk with expert score correction bias"""
         mock_grouped_topk.return_value = torch.ones(self.num_tokens,
                                                     self.num_experts)
 
         e_score_correction_bias = torch.randn(self.num_experts)
-        weights, ids, _ = select_experts(
+        weights, ids = select_experts(
             hidden_states=self.hidden_states,
             router_logits=self.router_logits,
             top_k=self.top_k,
@@ -796,35 +869,34 @@ class TestSelectExperts(TestBase):
 
     def test_custom_routing_function(self):
         """Test custom routing function"""
-        mock_custom_routing = MagicMock()
-        mock_custom_routing.return_value = (torch.ones(self.num_tokens,
-                                                       self.top_k),
-                                            torch.zeros(self.num_tokens,
-                                                        self.top_k,
-                                                        dtype=torch.int32))
-
-        weights, ids, _ = select_experts(
+        weights, ids = select_experts(
             hidden_states=self.hidden_states,
             router_logits=self.router_logits,
             top_k=self.top_k,
             use_grouped_topk=False,
             renormalize=False,
-            custom_routing_function=mock_custom_routing)
+            custom_routing_function=self.mock_custom_routing)
 
-        mock_custom_routing.assert_called_once()
+        self.mock_custom_routing.assert_called_once()
         self.assertEqual(weights.shape, (self.num_tokens, self.top_k))
         self.assertEqual(ids.shape, (self.num_tokens, self.top_k))
         self.assertEqual(ids.dtype, torch.int32)
 
-    @patch('torch.topk')
+    @patch('torch_npu.npu_moe_gating_top_k')
     def test_renormalize(self, mock_topk):
-        """Test weight renormalization"""
+        """Test renormalization"""
         mock_topk.return_value = (torch.ones(self.num_tokens, self.top_k),
                                   torch.zeros(self.num_tokens,
                                               self.top_k,
-                                              dtype=torch.long))
+                                              dtype=torch.long),
+                                  torch.arange(0,
+                                               self.num_tokens * self.top_k,
+                                               dtype=torch.int32).view(
+                                                   self.top_k,
+                                                   -1).permute(1,
+                                                               0).contiguous())
 
-        weights, ids, _ = select_experts(
+        weights, ids = select_experts(
             hidden_states=self.hidden_states,
             router_logits=self.router_logits,
             top_k=self.top_k,
@@ -836,15 +908,21 @@ class TestSelectExperts(TestBase):
         sums = weights.sum(dim=-1)
         self.assertTrue(torch.allclose(sums, torch.ones_like(sums)))
 
-    @patch('torch.topk')
+    @patch('torch_npu.npu_moe_gating_top_k')
     def test_output_dtypes(self, mock_topk):
         """Test output dtypes"""
         mock_topk.return_value = (torch.ones(self.num_tokens, self.top_k),
                                   torch.zeros(self.num_tokens,
                                               self.top_k,
-                                              dtype=torch.long))
+                                              dtype=torch.int32),
+                                  torch.arange(0,
+                                               self.num_tokens * self.top_k,
+                                               dtype=torch.int32).view(
+                                                   self.top_k,
+                                                   -1).permute(1,
+                                                               0).contiguous())
 
-        weights, ids, _ = select_experts(
+        weights, ids = select_experts(
             hidden_states=self.hidden_states,
             router_logits=self.router_logits,
             top_k=self.top_k,

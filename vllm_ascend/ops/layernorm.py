@@ -15,50 +15,31 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, cast
 
 import torch
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.config import get_current_vllm_config
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 
 
-class AddRMSNormW8A8Quant(RMSNorm):
-    # Fuse AddRmsNorm and W8A8 quantization ops together
+class AscendRMSNorm(RMSNorm):
 
     def __init__(
         self,
         hidden_size: int,
-        layer: torch.nn.Module,
         eps: float = 1e-6,
         var_hidden_size: Optional[int] = None,
         has_weight: bool = True,
         dtype: Optional[torch.dtype] = None,
     ) -> None:
         super().__init__(hidden_size, eps, var_hidden_size, has_weight, dtype)
-        self.layer = layer
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        import torch_npu
-
-        if residual is not None:
-            x, _, residual = torch_npu.npu_add_rms_norm_quant(
-                x,
-                residual,
-                self.weight,
-                self.layer.aclnn_input_scale,
-                self.layer.aclnn_input_offset,
-                epsilon=self.variance_epsilon)
-            return x, residual
-
-        x, residual = torch_npu.npu_rms_norm(x, self.weight,
-                                             self.variance_epsilon)
-        return x
-
-
-class AscendRMSNorm(RMSNorm):
+        vllm_config = get_current_vllm_config()
+        self.bias = None
+        # quantization with anti_method m4 will generate none-zero norm bias
+        if vllm_config.quant_config is not None and \
+                any("norm.bias" in name for name in vllm_config.quant_config.quant_description.keys()):
+            self.bias = torch.nn.Parameter(torch.zeros(hidden_size),
+                                           requires_grad=False)
 
     def forward_oot(
         self,
@@ -67,9 +48,9 @@ class AscendRMSNorm(RMSNorm):
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         import torch_npu
 
-        from vllm_ascend.utils import is_310p
+        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
         if residual is not None:
-            if is_310p():
+            if get_ascend_device_type() == AscendDeviceType._310P:
                 orig_dtype = residual.dtype
                 x = x + residual.to(x.dtype)
                 residual = x.to(orig_dtype)
@@ -78,8 +59,64 @@ class AscendRMSNorm(RMSNorm):
             else:
                 x, _, residual = torch_npu.npu_add_rms_norm(
                     x, residual, self.weight, self.variance_epsilon)
+                if self.bias is not None:
+                    x.add_(self.bias)
             return x, residual
 
         x, residual = torch_npu.npu_rms_norm(x, self.weight,
                                              self.variance_epsilon)
+        if self.bias is not None:
+            x.add_(self.bias)
+        return x
+
+
+class AscendQuantRMSNorm(AscendRMSNorm):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-6,
+        var_hidden_size: Optional[int] = None,
+        has_weight: bool = True,
+        dtype: Optional[torch.dtype] = None,
+    ) -> None:
+        super().__init__(hidden_size, eps, var_hidden_size, has_weight, dtype)
+        self.bias = torch.nn.Parameter(torch.zeros(hidden_size),
+                                       requires_grad=False)
+
+    def forward_oot(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        if residual is not None:
+            x, residual = super().forward_oot(x, residual)
+            return x.add_(self.bias), residual
+        return cast(torch.Tensor, super().forward_oot(x)).add_(self.bias)
+
+
+class AscendGemmaRMSNorm(GemmaRMSNorm):
+
+    def forward_oot(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        import torch_npu
+
+        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+        if residual is not None:
+            if get_ascend_device_type() == AscendDeviceType._310P:
+                orig_dtype = residual.dtype
+                x = x + residual.to(x.dtype)
+                residual = x.to(orig_dtype)
+                x, _ = torch_npu.npu_rms_norm(x, 1.0 + self.weight,
+                                              self.variance_epsilon)
+            else:
+                x, _, residual = torch_npu.npu_add_rms_norm(
+                    x, residual, 1.0 + self.weight, self.variance_epsilon)
+            return x, residual
+
+        x, _ = torch_npu.npu_rms_norm(x, 1.0 + self.weight,
+                                      self.variance_epsilon)
         return x

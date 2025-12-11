@@ -3,9 +3,9 @@
 ## Environmental Dependencies
 
  *  Software:
-     *  Python >= 3.9, < 3.12
-     *  CANN >= 8.2.rc1
-     *  PyTorch >= 2.7.1, torch-npu >= 2.7.1.dev20250724
+     *  Python >= 3.10, < 3.12
+     *  CANN >= 8.3.rc1
+     *  PyTorch == 2.7.1, torch-npu == 2.7.1
      *  vLLM (same version as vllm-ascend)
      *  mooncake-transfer-engine reference documentation: https://github.com/kvcache-ai/Mooncake/blob/main/doc/zh/ascend_transport.md
 
@@ -32,6 +32,7 @@ export GLOO_SOCKET_IFNAME="xxxxxx"
 export TP_SOCKET_IFNAME="xxxxxx"
 export HCCL_SOCKET_IFNAME="xxxxxx"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+export PHYSICAL_DEVICES=$(ls /dev/davinci* 2>/dev/null | grep -o '[0-9]\+' | sort -n | paste -sd',' -)
 
 vllm serve "/xxxxx/DeepSeek-V2-Lite-Chat" \
   --host localhost \
@@ -100,6 +101,7 @@ export GLOO_SOCKET_IFNAME="xxxxxx"
 export TP_SOCKET_IFNAME="xxxxxx"
 export HCCL_SOCKET_IFNAME="xxxxxx"
 export ASCEND_RT_VISIBLE_DEVICES=4,5,6,7
+export PHYSICAL_DEVICES=$(ls /dev/davinci* 2>/dev/null | grep -o '[0-9]\+' | sort -n | paste -sd',' -)
 
 vllm serve "/xxxxx/DeepSeek-V2-Lite-Chat" \
   --host localhost \

@@ -4,6 +4,7 @@ import os
 
 import pytest
 from vllm import SamplingParams
+from vllm.config import CompilationConfig, CUDAGraphMode
 
 from tests.e2e.conftest import VllmRunner
 
@@ -20,10 +21,12 @@ def model_name():
     return "wemaster/deepseek_mtp_main_random_bf16"
 
 
-def test_mtp_correctness(
-    sampling_config: SamplingParams,
-    model_name: str,
-):
+def mtp_correctness(sampling_config: SamplingParams,
+                    model_name: str,
+                    num_speculative_tokens: int,
+                    graph_mode: CUDAGraphMode = CUDAGraphMode.PIECEWISE,
+                    enforce_eager=False,
+                    disable_padded_drafter_batch=True):
     example_prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -38,25 +41,33 @@ def test_mtp_correctness(
                     tensor_parallel_size=1,
                     gpu_memory_utilization=0.7,
                     max_model_len=256,
-                    enforce_eager=True) as ref_llm:
+                    enforce_eager=enforce_eager) as ref_llm:
         ref_outputs = ref_llm.generate(example_prompts, sampling_config)
 
-    with VllmRunner(
-            model_name,
-            tensor_parallel_size=1,
-            max_num_seqs=256,
-            gpu_memory_utilization=0.7,
-            distributed_executor_backend="mp",
-            enable_expert_parallel=True,
-            speculative_config={
-                "method": "deepseek_mtp",
-                "num_speculative_tokens": 1,
-            },
-            enforce_eager=True,
-            max_model_len=2000,
-            additional_config={"ascend_scheduler_config": {
-                "enabled": False
-            }}) as spec_llm:
+    graph_mode_str = "PIECEWISE"
+    if graph_mode == CUDAGraphMode.FULL:
+        graph_mode_str = "FULL_DECODE_ONLY"
+
+    with VllmRunner(model_name,
+                    tensor_parallel_size=1,
+                    max_num_seqs=256,
+                    gpu_memory_utilization=0.7,
+                    distributed_executor_backend="mp",
+                    enable_expert_parallel=True,
+                    speculative_config={
+                        "method":
+                        "mtp",
+                        "num_speculative_tokens":
+                        num_speculative_tokens,
+                        "disable_padded_drafter_batch":
+                        disable_padded_drafter_batch,
+                    },
+                    enforce_eager=enforce_eager,
+                    max_model_len=2000,
+                    compilation_config=CompilationConfig(
+                        cudagraph_mode=graph_mode_str,
+                        cudagraph_capture_sizes=[12],
+                    )) as spec_llm:
         spec_outputs = spec_llm.generate(example_prompts, sampling_config)
 
     matches = 0
@@ -75,3 +86,91 @@ def test_mtp_correctness(
     # Upon failure, inspect the outputs to check for inaccuracy.
     assert matches > int(0.66 * len(ref_outputs))
     del spec_llm
+
+
+def test_mtp1_correctness_eager(
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    mtp_correctness(sampling_config, model_name, 1, enforce_eager=True)
+
+
+def test_mtp2_correctness_eager(
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    mtp_correctness(sampling_config, model_name, 2, enforce_eager=True)
+
+
+@pytest.mark.skip("TODO(cmq): Revert me when mtp aclgraph is fixed")
+def test_mtp1_correctness_piecewise_graph(
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    mtp_correctness(sampling_config, model_name, 1)
+
+
+@pytest.mark.skip("TODO(cmq): Revert me when mtp aclgraph is fixed")
+def test_mtp2_correctness_piecewise_graph(
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    mtp_correctness(sampling_config, model_name, 2)
+
+
+def test_mtp1_correctness_full_graph(
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    mtp_correctness(sampling_config, model_name, 1, CUDAGraphMode.FULL)
+
+
+def test_mtp2_correctness_full_graph(
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    mtp_correctness(sampling_config, model_name, 2, CUDAGraphMode.FULL)
+
+
+def test_mtp1_correctness_eager_with_pad(
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    mtp_correctness(sampling_config,
+                    model_name,
+                    1,
+                    enforce_eager=True,
+                    disable_padded_drafter_batch=False)
+
+
+def test_mtp2_correctness_eager_with_pad(
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    mtp_correctness(sampling_config,
+                    model_name,
+                    2,
+                    enforce_eager=True,
+                    disable_padded_drafter_batch=False)
+
+
+@pytest.mark.skip("TODO(xyx): Revert me when mtp aclgraph is fixed")
+def test_mtp1_correctness_piecewise_graph_with_pad(
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    mtp_correctness(sampling_config,
+                    model_name,
+                    1,
+                    disable_padded_drafter_batch=False)
+
+
+@pytest.mark.skip("TODO(xyx): Revert me when mtp aclgraph is fixed")
+def test_mtp2_correctness_piecewise_graph_with_pad(
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    mtp_correctness(sampling_config,
+                    model_name,
+                    2,
+                    disable_padded_drafter_batch=False)

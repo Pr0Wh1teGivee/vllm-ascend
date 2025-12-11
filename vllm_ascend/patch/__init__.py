@@ -23,11 +23,6 @@
 #           `vllm_ascend.utils.adapt_patch(is_global_patch=False)` in
 #           each worker's `__init__` function.
 #
-# Then in each kind of patch, there are three folders:
-# - patch_0_10_0: contains the patches applied when vllm version is 0.10.0.
-# - patch_main: contains the patches applied when vllm version is main branch.
-# - patch_common: contains the patches applied in both 0.10.0 and main branch.
-#
 # Once a new patch is added in vllm-ascend, please add the patch description into this file as well.
 # ----------------------------------------------------------------------------------
 
@@ -35,21 +30,97 @@
 # --------------------------------
 # * Platform Patch:
 # =================
-# ** File: platform/patch_common/patch_distributed.py**
+# ** 1. File: platform/patch_distributed.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.config.ParallelConfig.get_next_dp_init_port`
+#   1. `torch.distributed.all_reduce`, `torch.distributed.broadcast`
 #    Why:
-#       vllm doesn't support get port from environment.
+#       tensor alignment for 310p
 #    How：
-#       Add the logic to get port from environment.
+#       rewrite all_reduce and broadcast in torch.distributed
 #    Related PR (if no, explain why):
-#       Need a PR to vllm to support get port from environment.
+#       No, not ready yet.
 #    Future Plan:
-#       Remove those patch when vllm merged them
+#       Find a better way to support tensor alignment for 310p without this patch.
+#
+# ** 2. File: platform/patch_ec_connector.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.distributed.ec_transfer.ec_connector.shared_storage_connector.ECSharedStorageConnector.start_load_caches`
+#    Why:
+#       it's hard code to cuda
+#    How：
+#       change the cuda to npu
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/30225
+#    Future Plan:
+#       Remove this patch when vllm merges the PR.
+#
+# ** 3. File: platform/patch_mamba_config.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.config.HybridAttentionMambaModelConfig.verify_and_update_config`
+#    Why:
+#       block size is set to 16 in vLLM which is not supported by Ascend.
+#    How：
+#       Set block size to 128 on npu.
+#    Related PR (if no, explain why):
+#       we'll fix this in vLLM soon.
+#    Future Plan:
+#       Remove this patch when vLLM merges the PR.
+#
+# ** 4. File: platform/patch_multiproc_executor.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.executor.multiproc_executor.MultiprocExecutor`
+#    Why:
+#       vLLM create child process with daemon=True, which doesn't work with EPLB case, since EPLB will create
+#       a new process which is not allowed by daemon=True.
+#    How：
+#       Set daemon=False in MultiprocExecutor.
+#    Related PR (if no, explain why):
+#       Find a way to support daemon=False in vLLM
+#    Future Plan:
+#       Remove this patch when vLLM fix the issue.
+#
+# ** 5. File: platform/patch_sched_yield.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.distributed.utils.USE_SCHED_YIELD`
+#    Why:
+#       os.sched_yield() doesn't work on Arm systems.
+#    How：
+#       avoid using os.sched_yield() on Arm systems.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/30228
+#    Future Plan:
+#       Remove this patch when vLLM merge the PR.
+#
 #
 # * Worker Patch:
 # ===============
-# ** File: worker/patch_common/patch_minicpm.py **
+#
+# ** 1. File: worker/patch_deepseek.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `DeepseekV2Model.forward`
+#    Why:
+#       getattr(self.config, "llama_4_scaling", None) will raise AttributeError
+#       on npu with graph mode.
+#    How：
+#       catch the AttributeError and set llama_4_scaling to None.
+#    Related PR (if no, explain why):
+#       No, this is a bug in vLLM Ascend
+#    Future Plan:
+#       Find the root cause of this bug and fix it in vLLM Ascend.
+#
+# ** 2. File: worker/patch_distributed.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.distributed.parallel_state.GroupCoordinator`
+#    Why:
+#       vllm doesn't support all_to_all for GroupCoordinator.
+#    How：
+#       Add all_to_all implementation for GroupCoordinator.
+#    Related PR (if no, explain why):
+#       No, we should use vlLM all2all manager to support all_to_all for npu.
+#    Future Plan:
+#       Remove this patch when the refactor of all2all manager is done.
+#
+# ** 3. File: worker/patch_minicpm.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.minicpm.MiniCPMAttention.forward`
 #    Why:
@@ -63,42 +134,122 @@
 #    Future Plan:
 #       Keep this patch in vllm-ascend.
 #
-# ** File: worker/patch_common/patch_distributed.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.distributed.parallel_state.GroupCoordinator`
+# ** 4. File: worker/patch_multimodal_merge.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.utils._merge_multimodal_embeddings`
 #    Why:
-#       vllm doesn't support all_to_all for GroupCoordinator.
+#       '_merge_multimodal_embeddings' func of vllm is incompatible with Ascend.
 #    How：
-#       Add all_to_all implementation for GroupCoordinator.
+#       Replace with CPU operation that can be executed asynchronously.
 #    Related PR (if no, explain why):
-#       Need a PR to vllm to support all_to_all for GroupCoordinator.
+#       This is a bug by Ascend only. It can' be fixed in vLLM.
 #    Future Plan:
-#       Remove this patch when vllm merged them.
+#       Identify this pattern in torch-npu and remove this patch.
 #
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.sample.sampler.Sampler.gather_logprobs`
+# ** 5. File: worker/patch_qwen2_5_omni.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen2_5_omni_thinker.Qwen2_5OmniThinkerForConditionalGeneration`
 #    Why:
-#       We need to patch gather_logprobs to make sure call batched_count_greater_than
-#       with backend=current_platform.simple_compile_backend
+#       we have ascend forward context which doesn't work with upstream.
 #    How：
-#       Patch gather_logprobs call new batched_count_greater_than
+#       override forward_context in the model file
 #    Related PR (if no, explain why):
-#       - https://github.com/vllm-project/vllm/pull/21591
+#       This is a bug by Ascend only. we should drop set_ascend_forward_context
 #    Future Plan:
-#       Revert it when vLLM merge #21591 and release new version
-# ** File: worker/patch_common/patch_linear.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.linear.RowParallelLinear`
+#       Remove this patch once forward_context is refactor.
+#
+# ** 6. File: worker/patch_qwen2_5_vl.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen2_5_vl.Qwen2_5_VLForConditionalGeneration`
 #    Why:
-#       We need to fuse matmul and allreuce in `RowParallelLinear`
-#       to improve performance.
+#       we have ascend forward context which doesn't work with upstream.
 #    How：
-#       Create a new class `AscendRowParallelLinear` that inherits from `RowParallelLinear`.
-#       In this class, we override the `forward` method to use
-#       torch_npu.npu_mm_all_reduce_base to replace matmul and allreduce.
+#       override forward_context in the model file
 #    Related PR (if no, explain why):
-#       - https://github.com/vllm-project/vllm-ascend/pull/1926
+#       This is a bug by Ascend only. we should drop set_ascend_forward_context
 #    Future Plan:
-#       Validate more models in all kinds of scenario,
-#       if performance is always improved, we can enable this patch by default and remove the env
-#       variable `VLLM_ASCEND_ENABLE_FUSE_MATMUL_ALLREDUCE` in the future.
+#       Remove this patch once forward_context is refactor.
+#
+#   2. `vllm.model_executor.models.qwen2_vl.Qwen2VisionAttention.forward`
+#    Why:
+#       the attention is not custom ops
+#    How：
+#       make it to custom ops and pluggable
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/30125
+#    Future Plan:
+#       Remove this patch one the PR is merged into vLLM.
+#
+# ** 7. File: worker/patch_qwen3_vl.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3_vl.Qwen3_VisionTransformer.forward`
+#    Why:
+#       the attention is not custom ops
+#    How：
+#       make it to custom ops and pluggable
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/30125
+#    Future Plan:
+#       Remove this patch one the PR is merged into vLLM.
+#
+# ** 8. File: worker/patch_roberta.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.bert `
+#    Why:
+#       shift operation in `_encode_token_type_ids` and `_decode_token_type_ids` cannot run in ascend aclgraph mode
+#    How：
+#       Replace shift operation with multiplication and division.
+#    Related PR (if no, explain why):
+#       No, this need CANN add an aclnn shift operation
+#    Future Plan:
+#       Revert this when CANN support shift aclnn operation
+#
+# ** 9. File: worker/patch_triton.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.mamba.ops`, `vllm.model_executor.layers.fla.ops`
+#    Why:
+#       triton ops in vLLM perform not good on NPU. And there is no dispatch mechanism for triton ops.
+#    How：
+#       override triton ops in vLLM with ascend implementation
+#    Related PR (if no, explain why):
+#       Let vLLM support triton ops dispatch.
+#    Future Plan:
+#       Remove this patch when vLLM support the dispatch function.
+#
+# ** 10. File: worker/patch_weight_loader.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.linear.UnquantizedLinearMethod`
+#    Why:
+#       vLLM Ascend doesn't work with weight loader v2
+#    How：
+#       patch it to fix the bug.
+#    Related PR (if no, explain why):
+#       This is a bug by Ascend only.  We should fix it soon
+#    Future Plan:
+#       Remove this patch when the bug is fixed.
+#
+# ** File: worker/patch_qwen3_next_mtp.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.utils.bind_kv_cache`
+#    Why:
+#       'bind_kv_cache' func will raise an exception when current_platform is npu.
+#    How：
+#       Replace with a new bind_kv_cache.
+#       Skip the raise.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/4770
+#    Future Plan:
+#       Remove this patch after discussing with vllm community and adapting bind_kv_cache to npu.
+#
+# ** File: worker/patch_module.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.attention.backends.gdn_attn.torch.argsort`
+#    Why:
+#       'torch.argsort' func of npu does not support bool.
+#    How：
+#       Replace with a new torch.argsort that will cast the input to torch.int32.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/4770
+#    Future Plan:
+#       Remove this patch when bool is supported in 'torch.argsort' func of npu.
+#

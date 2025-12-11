@@ -19,10 +19,10 @@ from unittest.mock import MagicMock, PropertyMock, patch
 
 import torch
 from tests.ut.base import TestBase
-from vllm_ascend.ops.moe_dispatcher.token_dispatcher import (
-    AscendSocVersion, TokenDispatcherWithAll2AllV,
-    TokenDispatcherWithAllGather, TokenDispatcherWithMC2, _Dispatchers,
-    _register_token_dispatcher, get_token_dispatcher, setup_token_dispatchers)
+
+from vllm_ascend.ops.fused_moe.token_dispatcher import (  # isort: skip
+    AscendDeviceType, TokenDispatcherWithAll2AllV,
+    TokenDispatcherWithAllGather, TokenDispatcherWithMC2)
 
 
 class TestTokenDispatcherWithMC2(TestBase):
@@ -33,7 +33,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.mc2_group.rank_in_group = 0
         self.mc2_group.world_size = 8
         self.mc2_group_patch = patch(
-            "vllm_ascend.ops.moe_dispatcher.token_dispatcher.get_mc2_group",
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_mc2_group",
             return_value=self.mc2_group)
         self.mc2_group_patch.start()
 
@@ -49,15 +49,14 @@ class TestTokenDispatcherWithMC2(TestBase):
             return_value=self.forward_context)
         self.forward_context_patch.start()
 
-        # Mock get_ascend_soc_version()
+        # Mock get_ascend_device_type()
         self.ascend_soc_version_patch = patch(
-            "vllm_ascend.ops.moe_dispatcher.token_dispatcher.get_ascend_soc_version",
-            return_value=AscendSocVersion.A3)
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_ascend_device_type",
+            return_value=AscendDeviceType._910_93)
         self.ascend_soc_version_patch.start()
 
         kwargs = {"with_quant": False, "top_k": 8, "num_experts": 128}
         self.dispatcher = TokenDispatcherWithMC2(**kwargs)
-        self.row_idx = torch.arange(10, dtype=torch.int32)
 
     def tearDown(self):
         self.mc2_group_patch.stop()
@@ -77,9 +76,10 @@ class TestTokenDispatcherWithMC2(TestBase):
         topk_ids = torch.randint(0, 8, (10, 1))
         topk_weights = torch.randn(10, 1)
         expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        mc2_mask = None
 
         kwargs = self.dispatcher.get_dispatch_mc2_kwargs(
-            hidden_states, topk_weights, topk_ids, expert_map)
+            hidden_states, topk_weights, topk_ids, expert_map, mc2_mask)
         self.assertIn("x", kwargs)
         self.assertIn("expert_ids", kwargs)
         self.assertEqual(kwargs["moe_expert_num"], 8)
@@ -91,13 +91,14 @@ class TestTokenDispatcherWithMC2(TestBase):
         expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
 
         with patch("torch_npu.npu_moe_distribute_dispatch_v2",
-                   return_value=(torch.randn(10, 128), ) * 5) as mock_dispatch:
+                   return_value=(torch.randn(10, 128), ) * 5 +
+                   (None, None)) as mock_dispatch:
             output = self.dispatcher.token_dispatch(hidden_states,
                                                     topk_weights, topk_ids,
-                                                    self.row_idx, expert_map)
+                                                    expert_map)
             mock_dispatch.assert_called_once()
             self.assertEqual(output["group_list_type"],
-                             1)  # group_list_type == 1
+                             0)  # group_list_type == 0
 
     def test_token_dispatch_with_shared_experts_and_quant(self):
         self.shared_experts = MagicMock()
@@ -111,11 +112,10 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.topk_weights = torch.randn(10, 1)
 
         with patch("torch_npu.npu_moe_distribute_dispatch_v2",
-                   return_value=(torch.randn(10, 128), ) * 5):
+                   return_value=(torch.randn(10, 128), ) * 5 + (None, None)):
             self.dispatcher.token_dispatch(self.hidden_states,
                                            self.topk_weights,
                                            torch.randint(0, 8, (10, 1)),
-                                           self.row_idx,
                                            torch.tensor(
                                                [0, 1, 2, 3, 4, 5, 6, 7]),
                                            shared_experts=self.shared_experts)
@@ -123,36 +123,68 @@ class TestTokenDispatcherWithMC2(TestBase):
     def test_get_combine_mc_kwargs_with_quant(self):
         self.dispatcher.with_quant = True
         hidden_states = torch.randn(10, 128)
-        self.dispatcher.topk_ids = torch.randint(0, 8, (10, 1))
-        self.dispatcher.topk_weights = torch.randint(0, 8, (10, 1))
-        self.dispatcher.expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
-        self.dispatcher.ep_recv_counts = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        topk_ids = torch.randint(0, 8, (10, 1))
+        topk_weights = torch.randn(10, 1)
+        expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        ep_recv_counts = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        tp_recv_counts = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        mc2_mask = None
+        assist_info_for_combine = torch.arange(10)
+
+        context_metadata = {
+            "topk_ids": topk_ids,
+            "topk_weights": topk_weights,
+            "expert_map": expert_map,
+            "ep_recv_counts": ep_recv_counts,
+            "mc2_mask": mc2_mask,
+            "assist_info_for_combine": assist_info_for_combine,
+            "expand_scales": None,
+            "tp_recv_counts": tp_recv_counts
+        }
+
         self.dispatcher.need_extra_args = True
         self.dispatcher.enable_dispatch_v2 = True
-        self.dispatcher.output = torch.randint(0, 8, (10, 1))
 
-        kwargs = self.dispatcher.get_combine_mc_kwargs(hidden_states)
+        kwargs = self.dispatcher.get_combine_mc_kwargs(hidden_states,
+                                                       context_metadata)
         self.assertIn("tp_send_counts", kwargs)
 
     def test_token_combine_with_shared_experts(self):
-        self.dispatcher.shared_experts = MagicMock()
-        self.dispatcher.shared_experts.down_proj.return_value = (torch.randn(
-            10, 128), torch.tensor(1.0))
-        self.dispatcher.shared_act = torch.randn(10, 128)
+        shared_experts = MagicMock()
+        shared_experts.down_proj.return_value = (torch.randn(10, 128),
+                                                 torch.tensor(1.0))
+
+        topk_ids = torch.randint(0, 8, (10, 1))
+        topk_weights = torch.randn(10, 1)
+        expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        ep_recv_counts = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        assist_info_for_combine = torch.arange(10)
+        tp_recv_counts = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+
+        context_metadata = {
+            "topk_ids": topk_ids,
+            "topk_weights": topk_weights,
+            "expert_map": expert_map,
+            "ep_recv_counts": ep_recv_counts,
+            "mc2_mask": None,
+            "assist_info_for_combine": assist_info_for_combine,
+            "expand_scales": None,
+            "shared_experts": shared_experts,
+            "shared_act": torch.randn(10, 128),
+            "swiglu_out_scale": torch.randn(10, 1),
+            "tp_recv_counts": tp_recv_counts
+        }
+
         self.dispatcher.with_quant = True
-        self.dispatcher.topk_ids = torch.randint(0, 8, (10, 1))
-        self.dispatcher.topk_weights = torch.randint(0, 8, (10, 1))
-        self.dispatcher.expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
-        self.dispatcher.ep_recv_counts = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
         self.dispatcher.need_extra_args = True
         self.dispatcher.enable_dispatch_v2 = True
-        self.dispatcher.swiglu_out_scale = torch.randint(0, 8, (10, 1))
-        self.dispatcher.output = torch.randint(0, 8, (10, 1))
-        self.hidden_states = torch.randn(10, 128)
 
+        hidden_states = torch.randn(10, 128)
         with patch("torch_npu.npu_moe_distribute_combine_v2",
                    return_value=torch.randn(10, 128)):
-            self.dispatcher.token_combine(self.hidden_states)
+            result = self.dispatcher.token_combine(hidden_states,
+                                                   context_metadata)
+            self.assertIsInstance(result, tuple)
 
 
 class TestTokenDispatcherWithAllGather(TestBase):
@@ -170,32 +202,24 @@ class TestTokenDispatcherWithAllGather(TestBase):
         self.dispatcher = TokenDispatcherWithAllGather(**kwargs)
 
         # Mock NPU functions
-        self.patcher_moe_init_routing = patch('torch_npu.npu_moe_init_routing')
-        self.mock_moe_init_routing = self.patcher_moe_init_routing.start()
-        self.mock_moe_init_routing.return_value = (
+        self.patcher_npu_moe_init_routing_v2 = patch(
+            'torch_npu.npu_moe_init_routing_v2')
+        self.mock_npu_moe_init_routing_v2 = self.patcher_npu_moe_init_routing_v2.start(
+        )
+        self.mock_npu_moe_init_routing_v2.return_value = (
             torch.randn(6, 128),  # sorted_hidden_states
             torch.tensor([0, 1, 2, 3, 4, 5]),  # expanded_row_idx
-            torch.tensor([0, 1, 0, 1, 0, 1])  # expanded_expert_idx
+            torch.tensor([0, 1, 0, 1, 0, 1]),  # expanded_expert_idx
+            torch.tensor([0, 1, 0, 1, 0, 1]))
+        self.patcher_npu_moe_token_unpermute = patch(
+            'torch_npu.npu_moe_token_unpermute')
+        self.mock_npu_moe_token_unpermute = self.patcher_npu_moe_token_unpermute.start(
         )
-
-        self.patcher_moe_compute_expert_tokens = patch(
-            'torch_npu.npu_moe_compute_expert_tokens')
-        self.mock_moe_compute_expert_tokens = self.patcher_moe_compute_expert_tokens.start(
-        )
-        self.mock_moe_compute_expert_tokens.return_value = torch.tensor(
-            [3, 3])  # expert_tokens
-
-        self.patcher_moe_finalize_routing = patch(
-            'torch_npu.npu_moe_finalize_routing')
-        self.mock_moe_finalize_routing = self.patcher_moe_finalize_routing.start(
-        )
-        self.mock_moe_finalize_routing.return_value = torch.randn(3, 128)
-        self.row_idx = torch.arange(10, dtype=torch.int32)
+        self.mock_npu_moe_token_unpermute.return_value = torch.randn(6, 128)
 
     def tearDown(self):
-        self.patcher_moe_init_routing.stop()
-        self.patcher_moe_compute_expert_tokens.stop()
-        self.patcher_moe_finalize_routing.stop()
+        self.patcher_npu_moe_init_routing_v2.stop()
+        self.patcher_npu_moe_token_unpermute.stop()
 
     def test_token_dispatch_without_expert_map(self):
         hidden_states = torch.randn(3, 128)
@@ -203,13 +227,48 @@ class TestTokenDispatcherWithAllGather(TestBase):
         topk_ids = torch.tensor([[0, 1], [1, 2], [2, 3]])
 
         results = self.dispatcher.token_dispatch(hidden_states, topk_weights,
-                                                 topk_ids, self.row_idx, None)
+                                                 topk_ids, None)
 
         # Verify npu_moe_init_routing is called
-        self.mock_moe_init_routing.assert_called_once()
-        args, kwargs = self.mock_moe_init_routing.call_args
+        self.mock_npu_moe_init_routing_v2.assert_called_once()
+        args, kwargs = self.mock_npu_moe_init_routing_v2.call_args
 
-        self.assertEqual(results["group_list_type"], 0)
+        self.assertEqual(results["group_list_type"], 1)
+
+    def test_token_dispatch_with_expert_map(self):
+        self.dispatcher.expert_map = torch.tensor([0, 1, 2, 3])
+        hidden_states = torch.randn(3, 128)
+        topk_weights = torch.tensor([[0.7, 0.3], [0.6, 0.4], [0.5, 0.5]])
+        topk_ids = torch.tensor([[0, 1], [1, 2], [2, 3]])
+
+        results = self.dispatcher.token_dispatch(hidden_states, topk_weights,
+                                                 topk_ids, None)
+
+        # Verify npu_moe_init_routing is called
+        self.mock_npu_moe_init_routing_v2.assert_called_once()
+        args, kwargs = self.mock_npu_moe_init_routing_v2.call_args
+
+        self.assertEqual(results["group_list_type"], 1)
+
+    def test_token_dispatch_without_quant(self):
+        kwargs = {
+            "apply_router_weight_on_input": False,
+            "top_k": 2,
+            "max_num_tokens": 100,
+            "ep_size": 2,
+            "num_experts": 128,
+        }
+        self.dispatcher_quant = TokenDispatcherWithAllGather(**kwargs)
+
+        hidden_states = torch.randn(3, 128)
+        topk_weights = torch.tensor([[0.7, 0.3], [0.6, 0.4], [0.5, 0.5]])
+        topk_ids = torch.tensor([[0, 1], [1, 2], [2, 3]])
+
+        results = self.dispatcher_quant.token_dispatch(hidden_states,
+                                                       topk_weights, topk_ids,
+                                                       None)
+
+        self.assertEqual(results["group_list_type"], 1)
 
     def test_token_dispatch_with_quant(self):
         kwargs = {
@@ -226,43 +285,38 @@ class TestTokenDispatcherWithAllGather(TestBase):
         topk_ids = torch.tensor([[0, 1], [1, 2], [2, 3]])
 
         results = self.dispatcher_quant.token_dispatch(hidden_states,
-                                                       topk_weights, topk_ids,
-                                                       self.row_idx, None)
+                                                       topk_weights,
+                                                       topk_ids,
+                                                       None,
+                                                       with_quant=True)
 
-        self.assertEqual(results["group_list_type"], 0)
+        self.assertIsNotNone(results["hidden_states"])
+        self.assertIsNotNone(results["group_list"])
+        self.assertIsNotNone(results["dynamic_scale"])
+        self.assertEqual(results["group_list_type"], 1)
 
     def test_token_combine_with_expert_map(self):
-        self.dispatcher.expert_map = torch.tensor([0, 1, 2, 3])
-        self.dispatcher.sorted_token_indices = torch.tensor([0, 1, 1, 1, 1, 1])
-        self.dispatcher.sorted_weights = torch.tensor(
-            [0.5, 0.5, 0.5, 0.5, 0.5, 0.5])
-        self.dispatcher.original_shape = (3, 128)
-        self.dispatcher.mask = torch.tensor([0, 1, 1, 0])
         hidden_states = torch.randn(6, 128)
-
-        final_hidden_states = self.dispatcher.token_combine(hidden_states)
-
-        # Verify index_add_ is applied correctly
-        self.assertEqual(final_hidden_states.shape, (3, 128))
+        context_metadata = {
+            "expanded_row_idx": torch.tensor([0, 1, 1, 1, 1, 1]),
+            "topk_weights": torch.tensor([0.5, 0.5, 0.5, 0.5, 0.5, 0.5]),
+        }
+        self.dispatcher.original_shape = (6, 128)
+        final_hidden_states = self.dispatcher.token_combine(
+            hidden_states, context_metadata)
+        self.assertEqual(final_hidden_states.shape, (6, 128))
 
     def test_token_combine_without_expert_map(self):
-        self.dispatcher.with_quant = False
-        self.dispatcher.expanded_row_idx = torch.tensor([0, 1, 1, 1, 1, 1])
-        self.dispatcher.topk_ids = torch.tensor([[0, 1], [1, 2], [2, 3]])
-        self.dispatcher.sorted_token_indices = torch.tensor([0, 1, 1, 1, 1, 1])
-        self.dispatcher.sorted_weights = torch.tensor(
-            [0.5, 0.5, 0.5, 0.5, 0.5, 0.5])
-        self.dispatcher.original_shape = (3, 128)
-        self.dispatcher.mask = torch.tensor([0, 1, 1, 0])
         hidden_states = torch.randn(6, 128)
-
-        final_hidden_states = self.dispatcher.token_combine(hidden_states)
-
-        # Verify npu_moe_finalize_routing is called
-        self.mock_moe_finalize_routing.assert_called_once()
-        args, kwargs = self.mock_moe_finalize_routing.call_args
-
-        self.assertEqual(final_hidden_states.shape, (3, 128))
+        context_metadata = {
+            "expanded_row_idx": torch.tensor([0, 1, 1, 1, 1, 1]),
+            "topk_weights": torch.tensor([0.5, 0.5, 0.5, 0.5, 0.5, 0.5]),
+        }
+        self.dispatcher.original_shape = (6, 128)
+        final_hidden_states = self.dispatcher.token_combine(
+            hidden_states, context_metadata)
+        self.mock_npu_moe_token_unpermute.assert_called_once()
+        self.assertEqual(final_hidden_states.shape, (6, 128))
 
     def test_token_dispatch_with_router_weight(self):
         self.dispatcher.apply_router_weight_on_input = True
@@ -314,7 +368,8 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.mock_npu_moe_token_unpermute.return_value = torch.randn(8, 16)
 
         # Mock async_all_to_all
-        patcher6 = patch('vllm_ascend.ops.comm_utils.async_all_to_all')
+        patcher6 = patch(
+            'vllm_ascend.ops.fused_moe.comm_utils.async_all_to_all')
         self.mock_async_all_to_all = patcher6.start()
         self.addCleanup(patcher6.stop)
         self.mock_async_all_to_all.return_value = (None, torch.randn(16, 16),
@@ -322,7 +377,7 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
 
         # Mock gather_from_sequence_parallel_region
         patcher7 = patch(
-            'vllm_ascend.ops.moe_dispatcher.token_dispatcher.gather_from_sequence_parallel_region'
+            'vllm_ascend.ops.fused_moe.token_dispatcher.gather_from_sequence_parallel_region'
         )
         self.mock_gather_from_sequence_parallel_region = patcher7.start()
         self.addCleanup(patcher7.stop)
@@ -366,7 +421,6 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
                                                       num_experts=4,
                                                       num_local_experts=2,
                                                       with_quant=False)
-        self.row_idx = torch.arange(10, dtype=torch.int32)
 
     def test_token_dispatch(self):
         hidden_states = torch.randn(8, 16)
@@ -381,7 +435,6 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         result = self.dispatcher.token_dispatch(hidden_states=hidden_states,
                                                 topk_weights=topk_weights,
                                                 topk_ids=topk_ids,
-                                                row_idx=self.row_idx,
                                                 expert_map=expert_map)
 
         self.assertIsNotNone(result["hidden_states"])
@@ -389,25 +442,21 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.assertEqual(result["group_list_type"], 1)
 
     def test_token_combine(self):
+        hidden_states = torch.randn(16, 16)
+        context_metadata = {
+            "input_splits": [4, 4],
+            "output_splits": [4, 4],
+            "topk_weights": torch.rand(8, 4),
+            "reversed_local_input_permutation_mapping": torch.arange(8),
+            "reversed_global_input_permutation_mapping": torch.arange(16),
+        }
         self.dispatcher.hidden_shape = (8, 16)
         self.dispatcher.hidden_shape_before_permute = (8, 16)
-        self.dispatcher.reversed_local_input_permutation_mapping = torch.arange(
-            8)
-        self.dispatcher.topk_weights = torch.rand(8, 4)
-        self.dispatcher.input_splits = [4, 4]
-        self.dispatcher.output_splits = [4, 4]
-        self.dispatcher.reversed_global_input_permutation_mapping = torch.arange(
-            16)
-
         self.dispatcher.expert_ids_per_ep_rank = torch.tensor(
             [0, 1], dtype=torch.int32)
         self.dispatcher.local_expert_indices = [0, 1]
-        self.dispatcher.num_global_tokens_per_local_expert = torch.tensor(
-            [[2, 2], [2, 2]], dtype=torch.int64)
 
-        expert_output = torch.randn(16, 16)
-        output = self.dispatcher.token_combine(expert_output)
-
+        output = self.dispatcher.token_combine(hidden_states, context_metadata)
         self.assertIsNotNone(output)
         self.assertEqual(output.shape, (8, 16))
 
@@ -428,7 +477,6 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         result = self.dispatcher.token_dispatch(hidden_states=hidden_states,
                                                 topk_weights=topk_weights,
                                                 topk_ids=topk_ids,
-                                                row_idx=self.row_idx,
                                                 expert_map=expert_map,
                                                 with_quant=True)
 
@@ -457,7 +505,6 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         result = self.dispatcher.token_dispatch(hidden_states=hidden_states,
                                                 topk_weights=topk_weights,
                                                 topk_ids=topk_ids,
-                                                row_idx=self.row_idx,
                                                 expert_map=expert_map,
                                                 with_quant=True)
 
@@ -480,126 +527,9 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         result = self.dispatcher.token_dispatch(hidden_states=hidden_states,
                                                 topk_weights=topk_weights,
                                                 topk_ids=topk_ids,
-                                                row_idx=self.row_idx,
                                                 expert_map=expert_map,
                                                 log2phy=log2phy)
 
         self.assertIsNotNone(result["hidden_states"])
         self.assertIsNotNone(result["group_list"])
         self.assertEqual(result["group_list_type"], 1)
-
-
-class TestDispatcherRegistry(TestBase):
-
-    def setUp(self):
-        _Dispatchers.clear()
-
-    def tearDown(self):
-        _Dispatchers.clear()
-
-    def test_register_and_get_token_dispatcher(self):
-        mock_dispatcher = MagicMock()
-        mock_dispatcher.__class__.__name__ = "MockDispatcher"
-
-        _register_token_dispatcher(mock_dispatcher)
-
-        self.assertIn("MockDispatcher", _Dispatchers)
-        self.assertIs(_Dispatchers["MockDispatcher"], mock_dispatcher)
-
-        retrieved_dispatcher = get_token_dispatcher("MockDispatcher")
-        self.assertIs(retrieved_dispatcher, mock_dispatcher)
-
-        self.assertIsNone(get_token_dispatcher("NonExistentDispatcher"))
-
-    @patch(
-        'vllm_ascend.ops.moe_dispatcher.token_dispatcher.TokenDispatcherWithAllGather'
-    )
-    @patch(
-        'vllm_ascend.ops.moe_dispatcher.token_dispatcher._register_token_dispatcher'
-    )
-    def test_setup_token_dispatchers_ep_size_1_creates_allgather(
-            self, mock_register, mock_allgather_class):
-        kwargs = {"top_k": 2, "num_experts": 8}
-        mock_instance = MagicMock()
-        mock_allgather_class.return_value = mock_instance
-
-        self.assertNotIn("TokenDispatcherWithAllGather", _Dispatchers)
-
-        setup_token_dispatchers(ep_size=1, **kwargs)
-
-        mock_allgather_class.assert_called_once_with(**kwargs)
-        mock_register.assert_called_once_with(mock_instance)
-
-    @patch(
-        'vllm_ascend.ops.moe_dispatcher.token_dispatcher.TokenDispatcherWithAll2AllV'
-    )
-    @patch(
-        'vllm_ascend.ops.moe_dispatcher.token_dispatcher._register_token_dispatcher'
-    )
-    def test_setup_token_dispatchers_ep_size_2_creates_all2allv(
-            self, mock_register, mock_all2allv_class):
-        kwargs = {"top_k": 2, "num_experts": 16, "num_local_experts": 2}
-        mock_instance = MagicMock()
-        mock_all2allv_class.return_value = mock_instance
-
-        self.assertNotIn("TokenDispatcherWithAll2AllV", _Dispatchers)
-
-        setup_token_dispatchers(ep_size=2, **kwargs)
-
-        mock_all2allv_class.assert_called_once_with(**kwargs)
-        mock_register.assert_called_once_with(mock_instance)
-
-    @patch(
-        'vllm_ascend.ops.moe_dispatcher.token_dispatcher.TokenDispatcherWithAll2AllV'
-    )
-    @patch(
-        'vllm_ascend.ops.moe_dispatcher.token_dispatcher.TokenDispatcherWithMC2'
-    )
-    @patch(
-        'vllm_ascend.ops.moe_dispatcher.token_dispatcher._register_token_dispatcher'
-    )
-    def test_setup_token_dispatchers_ep_size_16_creates_all2allv_and_mc2(
-            self, mock_register, mock_mc2_class, mock_all2allv_class):
-        kwargs = {"top_k": 2, "num_experts": 32, "num_local_experts": 2}
-        mock_all2allv_instance = MagicMock()
-        mock_mc2_instance = MagicMock()
-        mock_all2allv_class.return_value = mock_all2allv_instance
-        mock_mc2_class.return_value = mock_mc2_instance
-
-        self.assertNotIn("TokenDispatcherWithAll2AllV", _Dispatchers)
-        self.assertNotIn("TokenDispatcherWithMC2", _Dispatchers)
-
-        setup_token_dispatchers(ep_size=16, **kwargs)
-
-        mock_all2allv_class.assert_called_once_with(**kwargs)
-        mock_mc2_class.assert_called_once_with(**kwargs)
-        self.assertEqual(mock_register.call_count, 2)
-        mock_register.assert_any_call(mock_all2allv_instance)
-        mock_register.assert_any_call(mock_mc2_instance)
-
-    @patch(
-        'vllm_ascend.ops.moe_dispatcher.token_dispatcher.TokenDispatcherWithAll2AllV'
-    )
-    @patch(
-        'vllm_ascend.ops.moe_dispatcher.token_dispatcher.TokenDispatcherWithMC2'
-    )
-    @patch(
-        'vllm_ascend.ops.moe_dispatcher.token_dispatcher._register_token_dispatcher'
-    )
-    def test_setup_token_dispatchers_ep_size_16_skips_if_exist(
-            self, mock_register, mock_mc2_class, mock_all2allv_class):
-        kwargs = {"top_k": 2, "num_experts": 32, "num_local_experts": 2}
-        mock_existing_all2allv = MagicMock()
-        mock_existing_mc2 = MagicMock()
-        _Dispatchers["TokenDispatcherWithAll2AllV"] = mock_existing_all2allv
-        _Dispatchers["TokenDispatcherWithMC2"] = mock_existing_mc2
-
-        setup_token_dispatchers(ep_size=16, **kwargs)
-
-        mock_all2allv_class.assert_not_called()
-        mock_mc2_class.assert_not_called()
-        mock_register.assert_not_called()
-        self.assertIs(_Dispatchers["TokenDispatcherWithAll2AllV"],
-                      mock_existing_all2allv)
-        self.assertIs(_Dispatchers["TokenDispatcherWithMC2"],
-                      mock_existing_mc2)

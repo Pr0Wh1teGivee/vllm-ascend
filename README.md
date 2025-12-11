@@ -19,7 +19,8 @@ vLLM Ascend Plugin
 
 ---
 *Latest News* 🔥
-
+- [2025/09] We released the new official version [v0.9.1](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.9.1)! Please follow the [official guide](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/tutorials/large_scale_ep.html) to start deploy large scale Expert Parallelism (EP) on Ascend.
+- [2025/08] We hosted the [vLLM Beijing Meetup](https://mp.weixin.qq.com/s/7n8OYNrCC_I9SJaybHA_-Q) with vLLM and Tencent! Please find the meetup slides [here](https://drive.google.com/drive/folders/1Pid6NSFLU43DZRi0EaTcPgXsAzDvbBqF).
 - [2025/06] [User stories](https://vllm-ascend.readthedocs.io/en/latest/community/user_stories/index.html) page is now live! It kicks off with ‌LLaMA-Factory/verl//TRL/GPUStack‌ to demonstrate how ‌vLLM Ascend‌ assists Ascend users in enhancing their experience across fine-tuning, evaluation, reinforcement learning (RL), and deployment scenarios.
 - [2025/06] [Contributors](https://vllm-ascend.readthedocs.io/en/latest/community/contributors.html) page is now live! All contributions deserve to be recorded, thanks for all contributors.
 - [2025/05] We've released first official version [v0.7.3](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.7.3)! We collaborated with the vLLM community to publish a blog post sharing our practice: [Introducing vLLM Hardware Plugin, Best Practice from Ascend NPU](https://blog.vllm.ai/2025/05/12/hardware-plugin.html).
@@ -40,9 +41,9 @@ By using vLLM Ascend plugin, popular open-source models, including Transformer-l
 - Hardware: Atlas 800I A2 Inference series, Atlas A2 Training series, Atlas 800I A3 Inference series, Atlas A3 Training series, Atlas 300I Duo (Experimental)
 - OS: Linux
 - Software:
-  * Python >= 3.9, < 3.12
-  * CANN >= 8.2.rc1
-  * PyTorch >= 2.7.1, torch-npu >= 2.7.1.dev20250724
+  * Python >= 3.10, < 3.12
+  * CANN >= 8.3.rc1 (Ascend HDK version refers to [here](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/releasenote/releasenote_0000.html))
+  * PyTorch == 2.8.0, torch-npu == 2.8.0
   * vLLM (the same version as vllm-ascend)
 
 ## Getting Started
@@ -51,9 +52,8 @@ Please use the following recommended versions to get started quickly:
 
 | Version    | Release type | Doc                                  |
 |------------|--------------|--------------------------------------|
-|v0.10.0rc1|Latest release candidate|[QuickStart](https://vllm-ascend.readthedocs.io/en/latest/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/latest/installation.html) for more details|
-|v0.9.1rc3|Next stable release|[QuickStart](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/installation.html) for more details|
-|v0.7.3.post1|Latest stable version|[QuickStart](https://vllm-ascend.readthedocs.io/en/stable/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/stable/installation.html) for more details|
+|v0.11.0rc3|Latest release candidate|[QuickStart](https://vllm-ascend.readthedocs.io/en/latest/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/latest/installation.html) for more details|
+|v0.9.1|Latest stable version|[QuickStart](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/installation.html) for more details|
 
 ## Contributing
 See [CONTRIBUTING](https://vllm-ascend.readthedocs.io/en/latest/developer_guide/contribution/index.html) for more details, which is a step-by-step guide to help you set up development environment, build and test.
@@ -73,10 +73,11 @@ Below is maintained branches:
 
 | Branch     | Status       | Note                                 |
 |------------|--------------|--------------------------------------|
-| main       | Maintained   | CI commitment for vLLM main branch and vLLM 0.10.x branch   |
+| main       | Maintained   | CI commitment for vLLM main branch and vLLM v0.12.0 tag   |
 | v0.7.1-dev | Unmaintained | Only doc fixed is allowed |
 | v0.7.3-dev | Maintained   | CI commitment for vLLM 0.7.3 version, only bug fix is allowed and no new release tag any more. |
 | v0.9.1-dev | Maintained   | CI commitment for vLLM 0.9.1 version |
+| v0.11.0-dev | Maintained | CI commitment for vLLM 0.11.0 version |
 | rfc/feature-name | Maintained | [Feature branches](https://vllm-ascend.readthedocs.io/en/latest/community/versioning_policy.html#feature-branches) for collaboration |
 
 Please refer to [Versioning policy](https://vllm-ascend.readthedocs.io/en/latest/community/versioning_policy.html) for more details.

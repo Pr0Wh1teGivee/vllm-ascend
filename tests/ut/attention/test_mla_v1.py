@@ -1,26 +1,26 @@
+import os
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.linear import LinearBase
 
 from tests.ut.base import TestBase
+from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import (AscendMLABackend,
                                           AscendMLADecodeMetadata,
                                           AscendMLAImpl, AscendMLAMetadata,
                                           AscendMLAMetadataBuilder,
                                           AscendMLAPrefillMetadata)
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 
 
 class TestAscendMLABackend(TestBase):
 
     def test_get_name(self):
         self.assertEqual(AscendMLABackend.get_name(), "ASCEND_MLA")
-
-    def test_get_metadata_cls(self):
-        self.assertEqual(AscendMLABackend.get_metadata_cls(),
-                         AscendMLAMetadata)
 
     def test_get_builder_cls(self):
         self.assertEqual(AscendMLABackend.get_builder_cls(),
@@ -82,7 +82,8 @@ class TestAscendMLAPrefillMetadata(TestBase):
             seq_tot=seq_tot,
             max_seq_lens=max_seq_lens,
             workspace=workspace,
-            chunk_seq_lens=chunk_seq_lens)
+            chunk_seq_lens=chunk_seq_lens,
+            chunk_seq_lens_npu=chunk_seq_lens)
 
         metadata = AscendMLAPrefillMetadata(
             attn_mask=torch.tensor([[1, 0], [1, 1]], dtype=torch.bool),
@@ -103,6 +104,8 @@ class TestAscendMLAPrefillMetadata(TestBase):
         self.assertEqual(metadata.chunked_context.max_seq_lens, max_seq_lens)
         self.assertIs(metadata.chunked_context.workspace, workspace)
         self.assertIs(metadata.chunked_context.chunk_seq_lens, chunk_seq_lens)
+        self.assertIs(metadata.chunked_context.chunk_seq_lens_npu,
+                      chunk_seq_lens)
 
 
 class TestAscendMLADecodeMetadata(TestBase):
@@ -130,6 +133,7 @@ class TestAscendMLADecodeMetadata(TestBase):
 class TestAscendMLAMetadata(TestBase):
 
     def test_ascend_mla_metadata_default(self):
+        num_actual_tokens_pcp_padded = 100
         num_actual_tokens = 100
         slot_mapping = torch.randn(100, 4, 1024)
         query_start_loc = torch.tensor([1, 2, 3, 4])
@@ -150,12 +154,11 @@ class TestAscendMLAMetadata(TestBase):
         decode = None
         prefill = None
 
-        metadata = AscendMLAMetadata(num_actual_tokens, slot_mapping,
-                                     query_start_loc, seq_lens, block_tables,
-                                     num_decodes, num_decode_tokens,
-                                     num_prefills, num_input_tokens,
-                                     query_lens, head_dim, attn_mask,
-                                     attn_state, decode, prefill)
+        metadata = AscendMLAMetadata(
+            num_actual_tokens_pcp_padded, num_actual_tokens, slot_mapping,
+            query_start_loc, seq_lens, block_tables, num_decodes,
+            num_decode_tokens, num_prefills, num_input_tokens, query_lens,
+            head_dim, attn_mask, attn_state, decode, prefill)
 
         self.assertEqual(metadata.num_actual_tokens, num_actual_tokens)
         self.assertIs(metadata.slot_mapping, slot_mapping)
@@ -176,40 +179,211 @@ class TestAscendMLAMetadata(TestBase):
 
 class TestAscendMLAMetadataBuilder(TestBase):
 
-    def test_ascend_mla_metadata_builder_default(self):
+    @patch('vllm.distributed.parallel_state.get_pcp_group')
+    @patch('vllm.distributed.parallel_state._PCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch('vllm.distributed.parallel_state.get_dcp_group')
+    @patch('vllm.distributed.parallel_state._DCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch("vllm.distributed.get_decode_context_model_parallel_world_size",
+           return_value=1)
+    def test_ascend_mla_metadata_builder_default(self, mock_get_dcp_size,
+                                                 mock_dcp, mock_get_dcp_group,
+                                                 mock_pcp, mock_get_pcp_group):
         mock_vllm_config = MagicMock()
         mock_vllm_config.model_config.max_model_len = 1024
         mock_vllm_config.model_config.get_head_size.return_value = 64
         mock_vllm_config.model_config.dtype = torch.float16
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
-        mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
+        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
+        mock_vllm_config.scheduler_config.enable_chunked_prefill = False
         mock_device = 'cpu'
+
+        mock_dcp.world_size = 1
+        dcp_group = MagicMock(spec=GroupCoordinator)
+        dcp_group.rank_in_group = 0
+        dcp_group.world_size = 1
+        dcp_group.device_group = MagicMock()
+        mock_get_dcp_group.return_value = dcp_group
+
+        mock_pcp.world_size = 1
+        pcp_group = MagicMock(spec=GroupCoordinator)
+        pcp_group.rank_in_group = 0
+        pcp_group.world_size = 1
+        pcp_group.device_group = MagicMock()
+        mock_get_pcp_group.return_value = pcp_group
+
+        mock_vllm_config.speculative_config = None
 
         ascend_config = MagicMock()
         with patch("vllm_ascend.attention.mla_v1.get_ascend_config",
                    return_value=ascend_config):
-            builder = AscendMLAMetadataBuilder(mock_vllm_config, mock_device)
+            builder = AscendMLAMetadataBuilder(None, None, mock_vllm_config,
+                                               mock_device)
 
             self.assertEqual(builder.block_size,
                              mock_vllm_config.cache_config.block_size)
             self.assertEqual(
                 builder.chunked_prefill_enabled,
-                mock_vllm_config.scheduler_config.chunked_prefill_enabled)
+                mock_vllm_config.scheduler_config.enable_chunked_prefill)
 
-    def test_reorder_batch(self):
+    @patch('vllm.distributed.parallel_state.get_pcp_group')
+    @patch('vllm.distributed.parallel_state._PCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch('vllm.distributed.parallel_state.get_dcp_group')
+    @patch('vllm.distributed.parallel_state._DCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch("vllm.distributed.get_decode_context_model_parallel_world_size",
+           return_value=1)
+    def test_ascend_mla_metadata_builder_spec_decode(self, mock_get_dcp_size,
+                                                     mock_dcp,
+                                                     mock_get_dcp_group,
+                                                     mock_pcp,
+                                                     mock_get_pcp_group):
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.max_model_len = 1024
+        mock_vllm_config.model_config.get_head_size.return_value = 64
+        mock_vllm_config.model_config.dtype = torch.float16
+        mock_vllm_config.cache_config.block_size = 16
+        mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
+        mock_vllm_config.scheduler_config.enable_chunked_prefill = False
+        mock_device = 'cpu'
+
+        mock_dcp.world_size = 1
+        dcp_group = MagicMock(spec=GroupCoordinator)
+        dcp_group.rank_in_group = 0
+        dcp_group.world_size = 1
+        dcp_group.device_group = MagicMock()
+        mock_get_dcp_group.return_value = dcp_group
+
+        mock_pcp.world_size = 1
+        pcp_group = MagicMock(spec=GroupCoordinator)
+        pcp_group.rank_in_group = 0
+        pcp_group.world_size = 1
+        pcp_group.device_group = MagicMock()
+        mock_get_pcp_group.return_value = pcp_group
+
+        mock_spec_config = MagicMock()
+        mock_spec_config.num_speculative_tokens = 3
+        mock_vllm_config.speculative_config = mock_spec_config
+
+        ascend_config = MagicMock()
+        with patch("vllm_ascend.attention.mla_v1.get_ascend_config",
+                   return_value=ascend_config):
+            builder = AscendMLAMetadataBuilder(None, None, mock_vllm_config,
+                                               mock_device)
+
+            self.assertEqual(builder.block_size,
+                             mock_vllm_config.cache_config.block_size)
+            self.assertEqual(
+                builder.chunked_prefill_enabled,
+                mock_vllm_config.scheduler_config.enable_chunked_prefill)
+
+    @patch('vllm.distributed.parallel_state.get_pcp_group')
+    @patch('vllm.distributed.parallel_state._PCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch('vllm.distributed.parallel_state.get_dcp_group')
+    @patch('vllm.distributed.parallel_state._DCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch("vllm.distributed.get_decode_context_model_parallel_world_size",
+           return_value=1)
+    def test_ascend_mla_metadata_builder_build_full_graph(
+            self, mock_get_dcp_size, mock_dcp, mock_get_dcp_group, mock_pcp,
+            mock_get_pcp_group):
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.max_model_len = 1024
+        mock_vllm_config.model_config.get_head_size.return_value = 64
+        mock_vllm_config.model_config.dtype = torch.float16
+        mock_vllm_config.cache_config.block_size = 16
+        mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
+        mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
+        mock_device = 'cpu'
+        torch.Tensor.pin_memory = lambda x: x  # noqa
+
+        mock_dcp.world_size = 1
+        dcp_group = MagicMock(spec=GroupCoordinator)
+        dcp_group.rank_in_group = 0
+        dcp_group.world_size = 1
+        dcp_group.device_group = MagicMock()
+        mock_get_dcp_group.return_value = dcp_group
+
+        mock_pcp.world_size = 1
+        pcp_group = MagicMock(spec=GroupCoordinator)
+        pcp_group.rank_in_group = 0
+        pcp_group.world_size = 1
+        pcp_group.device_group = MagicMock()
+        mock_get_pcp_group.return_value = pcp_group
+
+        mock_spec_config = MagicMock()
+        mock_spec_config.num_speculative_tokens = 1
+        mock_spec_config.disable_padded_drafter_batch = True
+        mock_vllm_config.speculative_config = mock_spec_config
+
+        builder = AscendMLAMetadataBuilder(None, None, mock_vllm_config,
+                                           mock_device)
+        common_metadata = MagicMock()
+        model = MagicMock()
+        common_metadata.graph_pad_size = 8
+        common_metadata.num_reqs = 4
+        common_metadata.num_actual_tokens = 5
+        common_metadata.max_query_len = 5
+        common_metadata.seq_lens_cpu = torch.Tensor([9, 10, 8, 8]).int()
+        common_metadata.query_start_loc = torch.Tensor([0, 1, 2, 4, 5]).int()
+        common_metadata.query_start_loc_cpu = torch.Tensor([0, 1, 2, 4,
+                                                            5]).int()
+        common_metadata.positions = torch.Tensor([1, 2, 3, 4, 5, 6]).int()
+        block_table = torch.Tensor([[1, 0], [2, 0], [3, 0], [4, 0]]).int()
+        common_metadata.block_table_tensor = block_table
+        common_metadata.prefill_context_parallel_metadata = None
+        metadata = builder.build(0, common_metadata, model)
+
+        self.assertEqual(metadata.decode.actual_seq_lengths_q,
+                         [1, 2, 4, 5, 6, 6, 7, 8])
+        self.assertEqual(metadata.decode.block_table.shape[0], 8)
+
+    @patch('vllm.distributed.parallel_state.get_pcp_group')
+    @patch('vllm.distributed.parallel_state._PCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch('vllm.distributed.parallel_state.get_dcp_group')
+    @patch('vllm.distributed.parallel_state._DCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch("vllm.distributed.get_decode_context_model_parallel_world_size",
+           return_value=1)
+    def test_reorder_batch(self, mock_get_dcp_size, mock_dcp,
+                           mock_get_dcp_group, mock_pcp, mock_get_pcp_group):
         ascend_config = MagicMock()
 
         mock_vllm_config = MagicMock()
         mock_vllm_config.model_config.max_model_len = 1024
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
-        mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
+        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
+        mock_vllm_config.scheduler_config.enable_chunked_prefill = False
         mock_device = 'cpu'
+
+        mock_dcp.world_size = 1
+        dcp_group = MagicMock(spec=GroupCoordinator)
+        dcp_group.rank_in_group = 0
+        dcp_group.world_size = 1
+        dcp_group.device_group = MagicMock()
+        mock_get_dcp_group.return_value = dcp_group
+
+        mock_pcp.world_size = 1
+        pcp_group = MagicMock(spec=GroupCoordinator)
+        pcp_group.rank_in_group = 0
+        pcp_group.world_size = 1
+        pcp_group.device_group = MagicMock()
+        mock_get_pcp_group.return_value = pcp_group
+
+        mock_vllm_config.speculative_config = None
 
         with patch("vllm_ascend.attention.mla_v1.get_ascend_config",
                    return_value=ascend_config):
-            builder = AscendMLAMetadataBuilder(mock_vllm_config, mock_device)
+            builder = AscendMLAMetadataBuilder(None, None, mock_vllm_config,
+                                               mock_device)
             builder.decode_threshold = 1
 
         input_batch = MagicMock()
@@ -231,20 +405,456 @@ class TestAscendMLAMetadataBuilder(TestBase):
         self.assertTrue(modified)
         input_batch.swap_states.assert_called_once_with(1, 2)
 
+    @patch('vllm.distributed.parallel_state.get_pcp_group')
+    @patch('vllm.distributed.parallel_state._PCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch('vllm.distributed.parallel_state.get_dcp_group')
+    @patch('vllm.distributed.parallel_state._DCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch("vllm.distributed.get_decode_context_model_parallel_world_size",
+           return_value=1)
+    def test_pad_actual_seq_lens_q_mtp_disable_pad(self, mock_get_dcp_size,
+                                                   mock_dcp,
+                                                   mock_get_dcp_group,
+                                                   mock_pcp,
+                                                   mock_get_pcp_group):
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.max_model_len = 1024
+        mock_vllm_config.model_config.get_head_size.return_value = 64
+        mock_vllm_config.model_config.dtype = torch.float16
+        mock_vllm_config.cache_config.block_size = 16
+        mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
+        mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
+        mock_device = 'cpu'
+        mock_vllm_config.speculative_config = None
+
+        mock_dcp.world_size = 1
+        dcp_group = MagicMock(spec=GroupCoordinator)
+        dcp_group.rank_in_group = 0
+        dcp_group.world_size = 1
+        dcp_group.device_group = MagicMock()
+        mock_get_dcp_group.return_value = dcp_group
+
+        mock_pcp.world_size = 1
+        pcp_group = MagicMock(spec=GroupCoordinator)
+        pcp_group.rank_in_group = 0
+        pcp_group.world_size = 1
+        pcp_group.device_group = MagicMock()
+        mock_get_pcp_group.return_value = pcp_group
+
+        builder = AscendMLAMetadataBuilder(None, None, mock_vllm_config,
+                                           mock_device)
+        input_seq_lens = [1, 2, 4, 5]
+        expect_output = [1, 2, 4, 5, 6, 6, 7, 8]
+        num_reqs = 4
+        num_reqs_pad_size = 4
+        output_seq_lens = builder.pad_actual_seq_len_q_mtp_disable_pad(
+            num_reqs_pad_size, num_reqs, input_seq_lens)
+        self.assertEqual(output_seq_lens, expect_output)
+
+    @patch('vllm.distributed.parallel_state.get_pcp_group')
+    @patch('vllm.distributed.parallel_state._PCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch('vllm.distributed.parallel_state.get_dcp_group')
+    @patch('vllm.distributed.parallel_state._DCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch("vllm.distributed.get_decode_context_model_parallel_world_size",
+           return_value=1)
+    def test_pad_actual_seq_lens_q_mtp_enable_pad(self, mock_get_dcp_size,
+                                                  mock_dcp, mock_get_dcp_group,
+                                                  mock_pcp,
+                                                  mock_get_pcp_group):
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.max_model_len = 1024
+        mock_vllm_config.model_config.get_head_size.return_value = 64
+        mock_vllm_config.model_config.dtype = torch.float16
+        mock_vllm_config.cache_config.block_size = 16
+        mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
+        mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
+        mock_device = 'cpu'
+        mock_vllm_config.speculative_config = None
+
+        mock_dcp.world_size = 1
+        dcp_group = MagicMock(spec=GroupCoordinator)
+        dcp_group.rank_in_group = 0
+        dcp_group.world_size = 1
+        dcp_group.device_group = MagicMock()
+        mock_get_dcp_group.return_value = dcp_group
+
+        mock_pcp.world_size = 1
+        pcp_group = MagicMock(spec=GroupCoordinator)
+        pcp_group.rank_in_group = 0
+        pcp_group.world_size = 1
+        pcp_group.device_group = MagicMock()
+        mock_get_pcp_group.return_value = pcp_group
+
+        common_metadata = MagicMock()
+        common_metadata.actual_seq_lengths_q = [2, 4, 6, 8]
+
+        builder = AscendMLAMetadataBuilder(None, None, mock_vllm_config,
+                                           mock_device)
+        input_seq_lens = [2, 4, 6]
+        expect_output = [2, 4, 6, 8]
+        num_reqs = 3
+        num_reqs_pad_size = 1
+        output_seq_lens = builder.pad_actual_seq_len_q_mtp_enable_pad(
+            num_reqs_pad_size, num_reqs, input_seq_lens, common_metadata)
+        self.assertEqual(output_seq_lens, expect_output)
+
+
+class TestAscendMLAMetadataBuilderBuild(TestBase):
+
+    def setUp(self):
+        self.mock_vllm_config = MagicMock(spec=VllmConfig)
+        self.mock_vllm_config.cache_config = CacheConfig(block_size=32)
+        mock_scheduler_config = MagicMock(spec=SchedulerConfig)
+        mock_scheduler_config.max_num_seqs = 8
+        mock_scheduler_config.chunked_prefill_enabled = True
+        self.mock_vllm_config.scheduler_config = mock_scheduler_config
+        self.mock_vllm_config.speculative_config = None
+        self.mock_device = torch.device("cpu")
+        fake_weight_path = os.path.join(os.path.dirname(__file__), "..",
+                                        "fake_weight")
+        model_config = ModelConfig(
+            model=fake_weight_path,
+            skip_tokenizer_init=True,
+        )
+        model_config.hf_text_config.head_dim = 128
+        model_config.hf_text_config.qk_rope_head_dim = 32
+        self.mock_vllm_config.model_config = model_config
+        self.kv_cache_spec = MagicMock()
+        self.kv_cache_spec.num_layers = 32
+        self.kv_cache_spec.head_size = 128
+        self.kv_cache_spec.num_heads = 32
+
+    @patch("vllm_ascend.attention.mla_v1.get_pcp_group")
+    @patch(
+        "vllm_ascend.attention.mla_v1.get_decode_context_model_parallel_world_size"
+    )
+    @patch("vllm_ascend.attention.mla_v1.get_ascend_config")
+    @patch("vllm_ascend.attention.mla_v1.torch.zeros", wraps=torch.zeros)
+    @patch("torch.Tensor.npu", new=lambda self: self)
+    @patch("torch.npu.is_available")
+    def test_build_prefix_no_cache_metadata(self, mock_npu_available,
+                                            mock_zeros, mock_get_ascend_config,
+                                            mock_dcp_world_size,
+                                            mock_get_pcp_group):
+        mock_npu_available.return_value = False
+        mock_dcp_world_size.return_value = 1
+        torch.Tensor.pin_memory = lambda x: x  # noqa
+        pcp_group = MagicMock(spec=GroupCoordinator)
+        pcp_group.world_size = 1
+        mock_get_pcp_group.return_value = pcp_group
+
+        def zeros_override(*args, **kwargs):
+            kwargs.pop('pin_memory', None)
+            return mock_zeros._mock_wraps(*args, **kwargs)
+
+        mock_zeros.side_effect = zeros_override
+        common_attn_metadata = AscendCommonAttentionMetadata(
+            query_start_loc=torch.tensor([0, 3, 7]),
+            query_start_loc_cpu=torch.tensor([0, 3, 7]),
+            seq_lens_cpu=torch.tensor([5, 6]),
+            num_reqs=2,
+            num_actual_tokens=10,
+            max_query_len=5,
+            decode_token_per_req=torch.tensor([1, 1]),
+            block_table_tensor=torch.zeros((10, 10)),
+            slot_mapping=torch.tensor(range(20)),
+            actual_seq_lengths_q=torch.tensor([0, 1]),
+            positions=torch.tensor([10, 10]),
+            attn_mask=torch.ones((10, 10)),
+            spec_attn_mask=None,
+            attn_state=AscendAttentionState.PrefillNoCache,
+            num_computed_tokens_cpu=None,
+            seq_lens=None)
+
+        base_inputs = {
+            "num_actual_tokens": 10,
+            "slot_mapping": torch.tensor(range(10)),
+            "query_start_loc": torch.tensor([0, 3, 7]),
+            "seq_lens": torch.tensor([5, 6]),
+            "block_tables": torch.zeros((10, 10)),
+            "num_prefills": 2,
+        }
+
+        builder = AscendMLAMetadataBuilder(kv_cache_spec=self.kv_cache_spec,
+                                           layer_names=["layer_0", "layer_1"],
+                                           vllm_config=self.mock_vllm_config,
+                                           device=self.mock_device)
+
+        mock_model = MagicMock()
+        metadata = builder.build(1, common_attn_metadata, mock_model)
+
+        self.assertIsInstance(metadata, AscendMLAMetadata)
+        self.assertEqual(metadata.num_actual_tokens,
+                         base_inputs["num_actual_tokens"])
+        self.assertTrue(
+            torch.all(metadata.slot_mapping == base_inputs["slot_mapping"]))
+        self.assertEqual(metadata.head_dim, self.kv_cache_spec.head_size)
+
+    @patch("vllm_ascend.attention.mla_v1.get_pcp_group")
+    @patch(
+        "vllm_ascend.attention.mla_v1.get_decode_context_model_parallel_world_size"
+    )
+    @patch("vllm_ascend.attention.mla_v1.get_ascend_config")
+    @patch("vllm_ascend.attention.mla_v1.torch.zeros", wraps=torch.zeros)
+    @patch("torch.Tensor.npu", new=lambda self: self)
+    @patch("torch.npu.is_available")
+    def test_build_chunked_prefix_metadata(self, mock_npu_available,
+                                           mock_zeros, mock_get_ascend_config,
+                                           mock_dcp_world_size,
+                                           mock_get_pcp_group):
+        mock_npu_available.return_value = False
+        mock_dcp_world_size.return_value = 1
+        torch.Tensor.pin_memory = lambda x: x  # noqa
+        pcp_group = MagicMock(spec=GroupCoordinator)
+        pcp_group.world_size = 1
+        mock_get_pcp_group.return_value = pcp_group
+
+        def zeros_override(*args, **kwargs):
+            kwargs.pop('pin_memory', None)
+            return mock_zeros._mock_wraps(*args, **kwargs)
+
+        mock_zeros.side_effect = zeros_override
+
+        common_attn_metadata = AscendCommonAttentionMetadata(
+            query_start_loc=torch.tensor([0, 2, 5, 9]),
+            query_start_loc_cpu=torch.tensor([0, 2, 5, 9]),
+            seq_lens_cpu=torch.tensor([4, 5, 6]),
+            num_reqs=3,
+            num_actual_tokens=15,
+            max_query_len=6,
+            decode_token_per_req=torch.tensor([1, 1, 1]),
+            block_table_tensor=torch.zeros((10, 10)),
+            slot_mapping=torch.tensor(range(20)),
+            actual_seq_lengths_q=torch.tensor([0, 1, 2]),
+            positions=torch.tensor([10, 10]),
+            attn_mask=torch.ones((15, 15)),
+            spec_attn_mask=None,
+            attn_state=AscendAttentionState.ChunkedPrefill,
+            num_computed_tokens_cpu=None,
+            seq_lens=None)
+
+        base_inputs = {
+            "num_actual_tokens": 15,
+            "slot_mapping": torch.tensor(range(15)),
+            "query_start_loc": torch.tensor([0, 2, 5, 9]),
+            "seq_lens": torch.tensor([4, 5, 6]),
+            "block_tables": torch.zeros((10, 10)),
+            "num_prefills": 3,
+        }
+
+        builder = AscendMLAMetadataBuilder(kv_cache_spec=self.kv_cache_spec,
+                                           layer_names=["layer_0", "layer_1"],
+                                           vllm_config=self.mock_vllm_config,
+                                           device=self.mock_device)
+
+        mock_model = MagicMock()
+        metadata = builder.build(1, common_attn_metadata, mock_model)
+
+        self.assertIsInstance(metadata, AscendMLAMetadata)
+        self.assertEqual(metadata.num_actual_tokens,
+                         base_inputs["num_actual_tokens"])
+        self.assertTrue(
+            torch.all(metadata.slot_mapping == base_inputs["slot_mapping"]))
+        self.assertEqual(metadata.head_dim, self.kv_cache_spec.head_size)
+
+    @patch("vllm_ascend.attention.mla_v1.get_pcp_group")
+    @patch(
+        "vllm_ascend.attention.mla_v1.get_decode_context_model_parallel_world_size"
+    )
+    @patch("vllm_ascend.attention.mla_v1.get_ascend_config")
+    def test_build_decode_only_metadata(self, mock_get_ascend_config,
+                                        mock_dcp_world_size,
+                                        mock_get_pcp_group):
+        mock_dcp_world_size.return_value = 1
+        torch.Tensor.pin_memory = lambda x: x  # noqa
+
+        pcp_group = MagicMock(spec=GroupCoordinator)
+        pcp_group.world_size = 1
+        mock_get_pcp_group.return_value = pcp_group
+        common_attn_metadata = AscendCommonAttentionMetadata(
+            query_start_loc=torch.tensor([0, 1, 2, 3]),
+            query_start_loc_cpu=torch.tensor([0, 1, 2, 3]),
+            seq_lens_cpu=torch.tensor([4, 5, 6]),
+            num_reqs=3,
+            num_actual_tokens=3,
+            max_query_len=1,
+            block_table_tensor=torch.zeros((10, 10)),
+            slot_mapping=torch.tensor(range(3)),
+            actual_seq_lengths_q=torch.tensor([0, 1, 2]),
+            decode_token_per_req=torch.tensor([1, 1, 1]),
+            positions=torch.tensor([10, 10]),
+            attn_mask=torch.ones((3, 3)),
+            spec_attn_mask=None,
+            attn_state=AscendAttentionState.DecodeOnly,
+            num_computed_tokens_cpu=None,
+            seq_lens=None)
+
+        base_inputs = {
+            "num_actual_tokens": 3,
+            "slot_mapping": torch.tensor(range(3)),
+            "query_start_loc": torch.tensor([0, 1, 2, 3]),
+            "seq_lens": torch.tensor([4, 5, 6]),
+            "num_decodes": 3,
+        }
+
+        builder = AscendMLAMetadataBuilder(kv_cache_spec=self.kv_cache_spec,
+                                           layer_names=["layer_0", "layer_1"],
+                                           vllm_config=self.mock_vllm_config,
+                                           device=self.mock_device)
+
+        mock_model = MagicMock()
+        metadata = builder.build(1, common_attn_metadata, mock_model)
+
+        self.assertIsInstance(metadata, AscendMLAMetadata)
+        self.assertEqual(metadata.num_actual_tokens,
+                         base_inputs["num_actual_tokens"])
+        self.assertTrue(
+            torch.all(metadata.slot_mapping == base_inputs["slot_mapping"]))
+        self.assertEqual(metadata.head_dim, self.kv_cache_spec.head_size)
+
+    @patch("vllm_ascend.attention.mla_v1.get_pcp_group")
+    @patch(
+        "vllm_ascend.attention.mla_v1.get_decode_context_model_parallel_world_size"
+    )
+    @patch("vllm_ascend.attention.mla_v1.get_ascend_config")
+    def test_build_for_graph_capture_decode_only(self, mock_get_ascend_config,
+                                                 mock_dcp_world_size,
+                                                 mock_get_pcp_group):
+        mock_dcp_world_size.return_value = 1
+        torch.Tensor.pin_memory = lambda x: x  # noqa
+
+        pcp_group = MagicMock(spec=GroupCoordinator)
+        pcp_group.world_size = 1
+        mock_get_pcp_group.return_value = pcp_group
+        common_attn_metadata = AscendCommonAttentionMetadata(
+            query_start_loc=torch.tensor([0, 1, 2, 3]),
+            query_start_loc_cpu=torch.tensor([0, 1, 2, 3]),
+            seq_lens_cpu=torch.tensor([4, 5, 6]),
+            num_reqs=3,
+            num_actual_tokens=3,
+            max_query_len=1,
+            block_table_tensor=torch.zeros((10, 10)),
+            slot_mapping=torch.tensor(range(3)),
+            actual_seq_lengths_q=torch.tensor([0, 1, 2]),
+            decode_token_per_req=torch.tensor([1, 1, 1]),
+            positions=torch.tensor([10, 10]),
+            attn_mask=torch.ones((3, 3)),
+            spec_attn_mask=None,
+            attn_state=AscendAttentionState.DecodeOnly,
+            num_computed_tokens_cpu=None,
+            seq_lens=None)
+
+        base_inputs = {
+            "num_actual_tokens": 3,
+            "slot_mapping": torch.tensor(range(3)),
+            "query_start_loc": torch.tensor([0, 1, 2, 3]),
+            "seq_lens": torch.tensor([4, 5, 6]),
+            "num_decodes": 3,
+        }
+
+        builder = AscendMLAMetadataBuilder(kv_cache_spec=self.kv_cache_spec,
+                                           layer_names=["layer_0", "layer_1"],
+                                           vllm_config=self.mock_vllm_config,
+                                           device=self.mock_device)
+
+        mock_model = MagicMock()
+        metadata = builder.build_for_graph_capture(
+            common_attn_metadata, AscendAttentionState.DecodeOnly, mock_model)
+
+        self.assertIsInstance(metadata, AscendMLAMetadata)
+        self.assertEqual(metadata.num_actual_tokens,
+                         base_inputs["num_actual_tokens"])
+        self.assertTrue(
+            torch.all(metadata.slot_mapping == base_inputs["slot_mapping"]))
+        self.assertEqual(metadata.head_dim, self.kv_cache_spec.head_size)
+
+    @patch("vllm_ascend.attention.mla_v1.get_pcp_group")
+    @patch(
+        "vllm_ascend.attention.mla_v1.get_decode_context_model_parallel_world_size"
+    )
+    @patch("vllm_ascend.attention.mla_v1.get_ascend_config")
+    def test_build_for_graph_capture_prefill(self, mock_get_ascend_config,
+                                             mock_dcp_world_size,
+                                             mock_get_pcp_group):
+        mock_dcp_world_size.return_value = 1
+        torch.Tensor.pin_memory = lambda x: x  # noqa
+        pcp_group = MagicMock(spec=GroupCoordinator)
+        pcp_group.world_size = 1
+        mock_get_pcp_group.return_value = pcp_group
+        common_attn_metadata = AscendCommonAttentionMetadata(
+            query_start_loc=torch.tensor([0, 3, 7]),
+            query_start_loc_cpu=torch.tensor([0, 3, 7]),
+            seq_lens_cpu=torch.tensor([5, 6]),
+            num_reqs=2,
+            num_actual_tokens=10,
+            max_query_len=5,
+            decode_token_per_req=torch.tensor([1, 1]),
+            block_table_tensor=torch.zeros((10, 10)),
+            slot_mapping=torch.tensor(range(20)),
+            actual_seq_lengths_q=torch.tensor([0, 1]),
+            positions=torch.tensor([10, 10]),
+            attn_mask=torch.ones((10, 10)),
+            spec_attn_mask=None,
+            attn_state=AscendAttentionState.PrefillNoCache,
+            num_computed_tokens_cpu=None,
+            seq_lens=None)
+
+        builder = AscendMLAMetadataBuilder(kv_cache_spec=self.kv_cache_spec,
+                                           layer_names=["layer_0", "layer_1"],
+                                           vllm_config=self.mock_vllm_config,
+                                           device=self.mock_device)
+
+        mock_model = MagicMock()
+
+        with self.assertRaises(NotImplementedError) as ctx:
+            builder.build_for_graph_capture(
+                common_attn_metadata, AscendAttentionState.PrefillNoCache,
+                mock_model)
+        self.assertIn(
+            "Currently we only support building dummy metadata for DecodeOnly and SpecDecoding state",
+            str(ctx.exception))
+
 
 class TestAscendMLAImpl(TestBase):
 
+    @patch('vllm.distributed.parallel_state._PCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch('vllm.distributed.parallel_state._DCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch("vllm.distributed.get_decode_context_model_parallel_world_size",
+           return_value=1)
     @patch('vllm.distributed.parallel_state._TP',
            new_callable=lambda: MagicMock(spec=GroupCoordinator))
     @patch("vllm.distributed.get_tensor_model_parallel_world_size",
            return_value=2)
-    @patch("vllm.config.get_current_vllm_config")
+    @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.mla_v1.get_ascend_config")
-    def setUp(self, ascend_config, vllm_config, mock_get_tp_size, mock_tp):
+    def setUp(self, ascend_config, get_current_vllm_config, mock_get_tp_size,
+              mock_tp, mock_get_dcp_size, mock_dcp, mock_pcp):
         mock_tp.world_size = 2
+        mock_tp.rank_in_group = MagicMock()
+        mock_tp.device_group = MagicMock()
+        mock_dcp.world_size = 1
+        mock_dcp.rank_in_group = MagicMock()
+        mock_dcp.device_group = MagicMock()
+        mock_pcp.world_size = 1
+        mock_pcp.rank_in_group = MagicMock()
+        mock_pcp.device_group = MagicMock()
+        vllm_config = MagicMock()
         speculative_config = MagicMock()
+        model_config = MagicMock()
         speculative_config.num_speculative_tokens = 4
         vllm_config.speculative_config = speculative_config
+        model_config.dtype = torch.float16
+        vllm_config.model_config = model_config
+        get_current_vllm_config.return_value = vllm_config
+        vllm_config.additional_config = {"refresh": True}
+        init_ascend_config(vllm_config)
 
         num_heads = 256
         head_size = 1024
@@ -256,18 +866,20 @@ class TestAscendMLAImpl(TestBase):
         kv_a_layernorm.weight = torch.randn(96)
         kv_a_layernorm.variance_epsilon = 1e-6
         kwargs = {
-            "q_lora_rank": 64,
             "kv_lora_rank": 32,
             "qk_nope_head_dim": 64,
             "qk_rope_head_dim": 32,
             "qk_head_dim": 96,
             "v_head_dim": 128,
-            "rotary_emb": MagicMock(),
+            "q_lora_rank": 64,
             "q_proj": MagicMock(),
+            "q_b_proj": MagicMock(),
             "kv_b_proj": MagicMock(),
             "o_proj": MagicMock(),
             "kv_a_proj_with_mqa": MagicMock(),
+            "fused_qkv_a_proj": MagicMock(),
             "kv_a_layernorm": kv_a_layernorm,
+            "rotary_emb": MagicMock(),
         }
 
         self.impl = AscendMLAImpl(num_heads=num_heads,
@@ -289,13 +901,11 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.scale, 0.1)
         self.assertEqual(self.impl.num_kv_heads, 8)
         self.assertEqual(self.impl.kv_cache_dtype, "auto")
-        self.assertEqual(self.impl.q_lora_rank, 64)
         self.assertEqual(self.impl.kv_lora_rank, 32)
         self.assertEqual(self.impl.qk_nope_head_dim, 64)
         self.assertEqual(self.impl.qk_rope_head_dim, 32)
         self.assertEqual(self.impl.qk_head_dim, 96)
         self.assertEqual(self.impl.v_head_dim, 128)
-        self.assertIsNotNone(self.impl.rotary_emb)
         self.assertIsNotNone(self.impl.q_proj)
         self.assertIsNotNone(self.impl.kv_b_proj)
         self.assertIsNotNone(self.impl.o_proj)
@@ -303,21 +913,6 @@ class TestAscendMLAImpl(TestBase):
         self.assertIsNotNone(self.impl.kv_a_layernorm)
         self.assertEqual(self.impl.num_queries_per_kv, 32)
         self.assertEqual(self.impl.tp_size, 2)
-
-    def test_v_up_proj(self):
-        batch_size = 4
-        x = torch.randn(batch_size, self.impl.num_heads,
-                        self.impl.kv_lora_rank)
-
-        if not hasattr(self.impl, 'W_UV') or self.impl.W_UV is None:
-            self.impl.W_UV = torch.randn(self.impl.num_heads,
-                                         self.impl.kv_lora_rank,
-                                         self.impl.v_head_dim)
-        result = self.impl._v_up_proj(x)
-
-        self.assertEqual(result.shape[0], batch_size)
-        self.assertEqual(result.shape[1],
-                         self.impl.num_heads * self.impl.v_head_dim)
 
     def test_q_proj_and_k_up_proj(self):
         batch_size = 4
@@ -338,7 +933,8 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(q_pe.shape[1], self.impl.num_heads)
         self.assertEqual(q_pe.shape[2], self.impl.qk_rope_head_dim)
 
-    def test_process_weights_after_loading(self):
+    @patch('torch_npu.npu_format_cast')
+    def test_process_weights_after_loading(self, mock_format_cast):
         layer = MagicMock(spec=LinearBase)
         layer.input_size_per_partition = 10
         quant_method = MagicMock()
@@ -351,6 +947,7 @@ class TestAscendMLAImpl(TestBase):
         layer.weight = torch.randn(shape_0, shape_1)
         self.impl.kv_b_proj = layer
         apply.return_value = layer.weight.T
+        mock_format_cast.return_value = layer.weight
         self.impl.process_weights_after_loading(torch.bfloat16)
 
         self.assertEqual(self.impl.W_UK_T.shape[0], self.impl.num_heads)
@@ -401,6 +998,7 @@ class TestAscendMLAImpl(TestBase):
         chunk_ctx = MagicMock()
         chunk_ctx.seq_tot = [8]
         chunk_ctx.chunk_seq_lens = [torch.tensor([8])]
+        chunk_ctx.chunk_seq_lens_npu = [torch.tensor([8])]
         chunk_ctx.starts = [torch.tensor([0])]
 
         prefill_meta = MagicMock()
@@ -423,11 +1021,13 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(out.shape, prefix_out.shape)
         self.assertEqual(lse.shape, prefix_lse.shape)
 
+    @patch('vllm_ascend.attention.mla_v1.get_forward_context')
     @patch("vllm_ascend.attention.mla_v1.AscendMLAImpl._v_up_proj")
     @patch("torch_npu.npu_fused_infer_attention_score")
     def test_forward_decode_without_graph(self,
                                           mock_npu_fused_infer_attention_score,
-                                          mock_up_proj):
+                                          mock_up_proj,
+                                          mock_get_forward_context):
         num_tokens = 100
         block_size = 4
         q_nope = torch.randn(num_tokens, self.impl.num_heads,
@@ -449,6 +1049,7 @@ class TestAscendMLAImpl(TestBase):
         mock_up_proj.return_value = torch.randn(num_tokens,
                                                 self.impl.num_heads,
                                                 self.impl.v_head_dim)
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
         result = self.impl._forward_decode(q_nope, q_pe, k_nope, k_pe,
                                            block_size, metadata)
         self.assertEqual(result.shape[0], num_tokens)
@@ -457,9 +1058,12 @@ class TestAscendMLAImpl(TestBase):
         mock_up_proj.assert_called_once()
         mock_npu_fused_infer_attention_score.assert_called_once()
 
-    @patch("vllm_ascend.attention.mla_v1.npu_prefetch")
-    def test_mla_preprocess(self, magic_npu_fetch):
+    @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
+    @patch("vllm_ascend.attention.mla_v1.maybe_npu_prefetch")
+    def test_mla_preprocess(self, magic_npu_fetch,
+                            mock_maybe_all_gather_and_maybe_unpad):
         magic_npu_fetch.return_value = MagicMock()
+        mock_maybe_all_gather_and_maybe_unpad.side_effect = lambda x, label: x
         batch_size = 4
         seq_len = 8
         hidden_size = 1024
@@ -479,7 +1083,6 @@ class TestAscendMLAImpl(TestBase):
         attn_metadata.prefill.cos = torch.randn(2, 64)
         attn_metadata.prefill.sin = torch.randn(2, 64)
 
-        self.impl.q_a_proj = MagicMock()
         self.impl.q_a_layernorm = MagicMock()
         self.impl.q_a_layernorm.return_value = torch.randn(
             attn_metadata.num_actual_tokens, self.impl.num_heads,
@@ -487,7 +1090,14 @@ class TestAscendMLAImpl(TestBase):
         self.impl.kv_a_proj_with_mqa = MagicMock()
         self.impl.kv_a_proj_with_mqa.return_value = [
             torch.randn(num_prefill_tokens, self.impl.num_heads,
-                        self.impl.qk_nope_head_dim + self.impl.kv_lora_rank)
+                        self.impl.qk_rope_head_dim + self.impl.kv_lora_rank)
+        ]
+        self.impl.fused_qkv_a_proj = MagicMock()
+        self.impl.fused_qkv_a_proj.return_value = [
+            torch.randn(
+                num_prefill_tokens, self.impl.num_heads,
+                self.impl.qk_rope_head_dim + self.impl.kv_lora_rank +
+                self.impl.q_lora_rank)
         ]
         self.impl.q_proj = MagicMock()
         self.impl.q_proj.return_value = [
@@ -516,7 +1126,11 @@ class TestAscendMLAImpl(TestBase):
         self.impl.num_kv_heads = self.impl.num_heads
 
         decode_res, prefill_res = self.impl._mla_preprocess(
-            hidden_states, kv_cache, attn_metadata, need_gather_q_kv=False)
+            "mock_layer",
+            hidden_states,
+            kv_cache,
+            attn_metadata,
+            need_gather_q_kv=False)
 
         self.assertIsNotNone(decode_res)
         self.assertIsNotNone(prefill_res)
@@ -572,12 +1186,10 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(k_pe.shape[-1], self.impl.qk_rope_head_dim)
         self.assertEqual(k_nope.shape[-1], self.impl.kv_lora_rank)
 
-    @patch("torch.npu.stream")
-    @patch("vllm_ascend.attention.mla_v1.get_multistream_comm_context")
+    @patch('vllm_ascend.attention.mla_v1.get_forward_context')
     @patch("torch_npu.npu_fused_infer_attention_score")
     def test_forward_decode(self, mock_npu_fused_infer_attention_score,
-                            mock_get_multistream_comm_context,
-                            mock_npu_stream):
+                            mock_get_forward_context):
         B = 2
         N = self.impl.num_kv_heads
         BS = 100
@@ -600,23 +1212,7 @@ class TestAscendMLAImpl(TestBase):
         mock_npu_fused_infer_attention_score.return_value = [
             torch.randn(B, N, self.impl.kv_lora_rank), None
         ]
-        mock_get_multistream_comm_context.return_value = None
-
-        result = self.impl._forward_decode(q_nope, q_pe, k_nope, k_pe, BS,
-                                           attn_metadata)
-
-        self.assertEqual(result.shape[0], B)
-        self.assertEqual(result.shape[1], N)
-        self.assertEqual(result.shape[2], HD)
-
-        self.impl.enable_kv_nz = False
-        attn_metadata.attn_state = None
-        mock_return_value = MagicMock()
-        mock_get_multistream_comm_context.return_value = mock_return_value
-        mock_return_value.before_comm_event = MagicMock()
-        mock_return_value.comm_stream = MagicMock()
-        mock_npu_stream.return_value = MagicMock()
-
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
         result = self.impl._forward_decode(q_nope, q_pe, k_nope, k_pe, BS,
                                            attn_metadata)
 

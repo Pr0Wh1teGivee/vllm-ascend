@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-name: 'e2e test / doctest'
+name: 'ascend test / doctest'
 
 on:
   workflow_dispatch:
@@ -66,7 +66,7 @@ jobs:
           git --no-pager log -1 || true
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.1
 
       - name: Run vllm-ascend/tests/e2e/run_doctests.sh
         run: |

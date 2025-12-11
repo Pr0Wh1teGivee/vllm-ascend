@@ -3,11 +3,20 @@ import unittest
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import torch
+from transformers.configuration_utils import PretrainedConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.model_executor.layers.rotary_embedding import (
-    DeepseekScalingRotaryEmbedding, RotaryEmbedding)
+    DeepseekScalingRotaryEmbedding, MRotaryEmbedding, RotaryEmbedding)
+from vllm.platforms import CpuArchEnum
 
 from tests.ut.base import TestBase
+from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.ops.rotary_embedding import _custom_rotary_embedding_enabled
+from vllm_ascend.utils import AscendDeviceType
+
+MODEL = "Qwen3-0.6B"
+MODEL_VL = "Qwen/Qwen2.5-VL-3B-Instruct"
+MAX_NUM_BATCHED_TOKEND = 10000
 
 
 class TestCustomRotaryEmbeddingEnabled(unittest.TestCase):
@@ -88,23 +97,29 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
         self.mock_self.cos_sin_cache = self.cos_sin_cache
         self.mock_self.is_neox_style = self.is_neox_style
 
-    @patch('torch.ops._C')
-    @patch('vllm_ascend.ops.rotary_embedding.is_310p', return_value=False)
+    @patch('torch.ops._C_ascend')
+    @patch('vllm_ascend.utils.get_ascend_device_type',
+           return_value=AscendDeviceType._910_93)
     @patch('vllm_ascend.ops.rotary_embedding._custom_rotary_embedding_enabled',
            return_value=True)
     @patch('torch.ops._npu_rotary_embedding')
+    @patch('vllm.config.ModelConfig.__post_init__', MagicMock())
+    @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
+    @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))
+    @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
     def test_rope_forward_oot_custom_kernel(self, mock_rotary_embedding,
-                                            mock_custom_enabled, mock_is_310p,
-                                            mock__c):
-        mock_config = MagicMock()
-        mock_config.torchair_graph_config.enabled = False
-
-        # Setup mock for custom kernel path
-
+                                            mock_custom_enabled,
+                                            mock_soc_version, mock__c):
         mock__c.rotary_embedding.return_value = self.query, self.key
-
-        result_q, result_k = self.layer.forward(self.positions, self.query,
-                                                self.key)
+        vllm_config = VllmConfig()
+        model_config = ModelConfig(MODEL,
+                                   tokenizer=MODEL,
+                                   max_model_len=MAX_NUM_BATCHED_TOKEND)
+        model_config.hf_config = PretrainedConfig()
+        vllm_config.model_config = model_config
+        with set_ascend_forward_context(None, vllm_config):
+            result_q, result_k = self.layer.forward(self.positions, self.query,
+                                                    self.key)
 
         mock__c.rotary_embedding.assert_called_once()
         self.assertEqual(result_q.shape, self.query.shape)
@@ -113,49 +128,103 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
     @patch('vllm_ascend.ops.rotary_embedding._custom_rotary_embedding_enabled',
            return_value=False)
     @patch('torch_npu._npu_rotary_embedding')
+    @patch('vllm.config.ModelConfig.__post_init__', MagicMock())
+    @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
+    @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))
+    @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
     def test_rope_forward_oot_contiguous(self, mock_npu_rotary,
                                          mock_custom_enabled):
-        mock_config = MagicMock()
-        mock_config.torchair_graph_config.enabled = False
-
         # Test contiguous path when custom is disabled
         non_contig_query = self.query.transpose(0, 1)
         non_contig_key = self.key.transpose(0, 1)
-
-        result_q, result_k = self.layer.forward(self.positions,
-                                                non_contig_query,
-                                                non_contig_key)
+        vllm_config = VllmConfig()
+        model_config = ModelConfig(MODEL,
+                                   tokenizer=MODEL,
+                                   max_model_len=MAX_NUM_BATCHED_TOKEND)
+        model_config.hf_config = PretrainedConfig()
+        vllm_config.model_config = model_config
+        with set_ascend_forward_context(None, vllm_config):
+            result_q, result_k = self.layer.forward(self.positions,
+                                                    non_contig_query,
+                                                    non_contig_key)
 
         mock_npu_rotary.assert_called_once()
         self.assertEqual(result_q.shape, non_contig_query.shape)
         self.assertEqual(result_k.shape, non_contig_key.shape)
 
+    @patch('vllm.config.ModelConfig.__post_init__', MagicMock())
+    @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
+    @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))
+    @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
     def test_rope_forward_oot_with_offsets(self):
-        mock_config = MagicMock()
-        mock_config.torchair_graph_config.enabled = False
-
         # Test that NotImplementedError is raised when offsets is provided
         offsets = torch.tensor([1, 2, 3])
         with self.assertRaises(NotImplementedError):
-            self.layer.forward(self.positions, self.query, self.key, offsets)
+            vllm_config = VllmConfig()
+            model_config = ModelConfig(MODEL,
+                                       tokenizer=MODEL,
+                                       max_model_len=MAX_NUM_BATCHED_TOKEND)
+            model_config.hf_config = PretrainedConfig()
+            vllm_config.model_config = model_config
+            with set_ascend_forward_context(None, vllm_config):
+                self.layer.forward(self.positions, self.query, self.key,
+                                   offsets)
 
     @patch('vllm_ascend.ops.rotary_embedding._custom_rotary_embedding_enabled',
            return_value=False)
     @patch('torch_npu._npu_rotary_embedding')
+    @patch('vllm.config.ModelConfig.__post_init__', MagicMock())
+    @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
+    @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))
+    @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
     def test_rope_forward_oot_neox_style_override(self, mock_npu_rotary,
                                                   mock_custom_enabled):
-        mock_config = MagicMock()
-        mock_config.torchair_graph_config.enabled = False
-
         # Test neox_style override
-        result_q, result_k = self.layer.forward(self.positions,
-                                                self.query,
-                                                self.key,
-                                                is_neox_style_override=False)
-
+        vllm_config = VllmConfig()
+        model_config = ModelConfig(MODEL,
+                                   tokenizer=MODEL,
+                                   max_model_len=MAX_NUM_BATCHED_TOKEND)
+        model_config.hf_config = PretrainedConfig()
+        vllm_config.model_config = model_config
+        with set_ascend_forward_context(None, vllm_config):
+            result_q, result_k = self.layer.forward(
+                self.positions,
+                self.query,
+                self.key,
+                is_neox_style_override=False)
         # Check that neox_style=False was passed to the NPU function
         args, kwargs = mock_npu_rotary.call_args
         self.assertFalse(args[-1])
+
+    @patch('vllm_ascend.ops.rotary_embedding._custom_rotary_embedding_enabled',
+           return_value=False)
+    @patch('torch_npu._npu_rotary_embedding')
+    @patch('vllm.config.ModelConfig.__post_init__', MagicMock())
+    @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
+    @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))
+    @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
+    def test_rope_forward_oot_rotary_dim_less_than_head_size(
+            self, mock_npu_rotary, mock_custom_enabled):
+        # test case when rotary_dim < head_size
+        org_rotary_dim = self.layer.rotary_dim
+        self.layer.rotary_dim = self.layer.head_size // 2
+
+        vllm_config = VllmConfig()
+        model_config = ModelConfig(MODEL,
+                                   tokenizer=MODEL,
+                                   max_model_len=MAX_NUM_BATCHED_TOKEND)
+        model_config.hf_config = PretrainedConfig()
+        vllm_config.model_config = model_config
+        with set_ascend_forward_context(None, vllm_config):
+            result_q, result_k = self.layer.forward(self.positions, self.query,
+                                                    self.key)
+
+        mock_npu_rotary.assert_called_once()
+        self.assertEqual(result_q.shape, self.query.shape)
+        self.assertEqual(result_k.shape, self.key.shape)
+
+        # restore rotary_dim
+        self.layer.rotary_dim = org_rotary_dim
 
 
 class MockRopeModule:
@@ -204,28 +273,6 @@ class TestAscendDeepseekScalingRotaryEmbedding(TestBase):
             q_pe, k_pe = self.layer.forward(self.positions, self.query,
                                             self.key)
         mock_rope_forward_oot.assert_called_once()
-        assert q_pe.shape == self.query.shape
-        assert k_pe.shape == self.key.shape
-
-    @patch('vllm_ascend.ops.rotary_embedding._rope_forward_oot')
-    @patch("vllm.platforms.current_platform.device_type",
-           new=torch.device("cpu"))
-    @patch("vllm_ascend.ops.rotary_embedding.NPUPlatform",
-           new_callable=PropertyMock)
-    def test_native_rope_deepseek_forward_cache_handling(
-            self, mock_npuplatform, mock_rope_forward_oot):
-        mock_npuplatform.device_type = torch.device("cpu")
-        self.layer = self._create_layer()
-        self.layer.max_seq_len = 1024
-        # Test cache situation is true
-        with patch.object(self.layer, "_set_cos_sin_cache") as mock_set_cache:
-            mock_rope_forward_oot.return_value = (self.query, self.key)
-
-            q_pe, k_pe = self.layer.forward(self.positions,
-                                            self.query,
-                                            self.key,
-                                            max_seq_len=2048)
-        mock_set_cache.assert_called_once()
         assert q_pe.shape == self.query.shape
         assert k_pe.shape == self.key.shape
 
@@ -316,3 +363,91 @@ class TestAscendDeepseekScalingRotaryEmbedding(TestBase):
                 expected,
                 places=6,
                 msg=f"Failed for scale={scale}, mscale={mscale}")
+
+
+class TestAscendMRotaryEmbedding(unittest.TestCase):
+
+    def setUp(self):
+        # Common setup for tests
+        self.number_tokens = 3
+        self.num_head = 8
+        self.num_kvhead = 8
+        self.head_size = 128
+        self.max_position_embeddings = 128000
+        self.is_neox_style = True
+        self.rope_theta = 1000000.0
+        self.positions_1d = torch.tensor([1, 2, 3])
+        self.positions_2d = torch.randint(1, 10, (3, self.number_tokens))
+
+        self.query = torch.randn(
+            (self.number_tokens, self.num_head * self.head_size),
+            dtype=torch.bfloat16)
+        self.key = torch.randn(
+            (self.number_tokens, self.num_kvhead * self.head_size),
+            dtype=torch.bfloat16)
+
+        # Qwen2.5-VL mrope section case
+        self.mrope_section = [16, 24, 24]
+
+        self.layer = MRotaryEmbedding(self.head_size,
+                                      self.head_size,
+                                      self.max_position_embeddings,
+                                      base=self.rope_theta,
+                                      is_neox_style=self.is_neox_style,
+                                      dtype=torch.bfloat16,
+                                      mrope_section=self.mrope_section)
+
+        self.mock_config = MagicMock()
+
+    def _create_vllm_config(self):
+        vllm_config = VllmConfig()
+        model_config = ModelConfig(MODEL_VL,
+                                   tokenizer=MODEL_VL,
+                                   max_model_len=MAX_NUM_BATCHED_TOKEND)
+        model_config.hf_config = PretrainedConfig()
+        vllm_config.model_config = model_config
+        return vllm_config
+
+    @patch('torch_npu.npu_mrope')
+    @patch('vllm_ascend.platform.NPUPlatform.get_cpu_architecture')
+    @patch('vllm.config.ModelConfig.__post_init__', MagicMock())
+    @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
+    @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))
+    @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
+    def test_forward_oot_1d_positions(self, mock_cpu_arc, mock_npu_mrope):
+        mock_cpu_arc.return_value = CpuArchEnum.ARM
+
+        mock_npu_mrope.return_value = (torch.zeros_like(self.query),
+                                       torch.zeros_like(self.key))
+
+        vllm_config = self._create_vllm_config()
+        with set_ascend_forward_context(None, vllm_config):
+            result_q, result_k = self.layer.forward_oot(
+                self.positions_1d, self.query, self.key)
+
+        mock_npu_mrope.assert_called_once()
+        self.assertFalse(torch.isnan(result_q).any().item())
+        self.assertFalse(torch.isnan(result_k).any().item())
+        self.assertEqual(result_q.shape, self.query.shape)
+
+    @patch('torch_npu.npu_mrope')
+    @patch('vllm_ascend.platform.NPUPlatform.get_cpu_architecture')
+    @patch('vllm.config.ModelConfig.__post_init__', MagicMock())
+    @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
+    @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))
+    @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
+    def test_forward_oot_2d_positions(self, mock_cpu_arc, mock_npu_mrope):
+        mock_cpu_arc.return_value = CpuArchEnum.ARM
+
+        mock_npu_mrope.return_value = (torch.zeros_like(self.query),
+                                       torch.zeros_like(self.key))
+
+        vllm_config = self._create_vllm_config()
+        with set_ascend_forward_context(None, vllm_config):
+            result_q, result_k = self.layer.forward_oot(
+                self.positions_2d, self.query, self.key)
+
+        mock_npu_mrope.assert_called_once()
+        self.assertFalse(torch.isnan(result_q).any().item())
+        self.assertFalse(torch.isnan(result_k).any().item())
+        self.assertEqual(result_q.shape, self.query.shape)
