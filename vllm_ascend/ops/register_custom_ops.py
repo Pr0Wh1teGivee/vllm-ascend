@@ -36,7 +36,7 @@ def _maybe_chunk_residual_impl(x: torch.Tensor,
 
     return residual
 
-
+# called in fusedmoe after select experts
 def _maybe_all_gather_and_maybe_unpad_impl(
         x: torch.Tensor,
         label: bool,
@@ -73,7 +73,7 @@ def _maybe_all_gather_and_maybe_unpad_impl(
 
     return x
 
-
+# called in allgather finalize, finalize with ep group
 def _maybe_pad_and_reduce_impl(x: torch.Tensor,
                                is_ep_comm: bool = False) -> torch.Tensor:
     try:
