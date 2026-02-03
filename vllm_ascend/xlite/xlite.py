@@ -19,17 +19,19 @@ from typing import Any, Callable, Tuple
 import torch
 import torch.nn as nn
 from vllm.config import VllmConfig
-from vllm.distributed import (get_tensor_model_parallel_world_size,
+from vllm.distributed import (get_ep_group,
+                              get_tensor_model_parallel_world_size,
                               get_world_group)
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
-from xlite._C import AttnMHA, Model, ModelAttnMeta, ModelConfig, Runtime
+from xlite._C import (AttnMHA, Model, ModelAttnMeta, ModelConfig, Runtime, # type: ignore[attr-defined]
+                      ScoringFuncSoftmax)
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
                                                 AscendMetadata)
-from vllm_ascend.utils import is_enable_nz
 
 
 class XliteModel:
@@ -47,17 +49,72 @@ class LlamaXliteModel(XliteModel):
             self, runnable: nn.Module,
             vllm_config: VllmConfig) -> Tuple[Model, int, int, torch.dtype]:
         dtype = vllm_config.model_config.dtype
-        params_dict = dict(runnable.named_parameters())
-        layers = runnable.model.layers
-
         config = self._build_model_config(vllm_config)
+        xlite_model = self._build_model(runnable, vllm_config, config)
+        rank = torch.distributed.get_rank()
+        xlite_model.init(config, rank)
+
+        freq_cis = self._precompute_freqs_cis(config.head_dim,
+                                              config.max_seq_len, dtype,
+                                              config.rope_theta)
+
+        return (xlite_model, freq_cis, config.hidden_size, dtype)
+
+    def _build_model_config(self, vllm_config: VllmConfig) -> ModelConfig:
+        hf_config = vllm_config.model_config.hf_text_config
+        if hasattr(hf_config, "text_config"):
+            hf_config = hf_config.text_config
+        config = ModelConfig()
+        config.vocab_size = hf_config.vocab_size
+        config.hidden_size = hf_config.hidden_size
+        config.n_layers = hf_config.num_hidden_layers
+        config.n_heads = hf_config.num_attention_heads
+        config.n_kv_heads = hf_config.num_key_value_heads
+        if hasattr(hf_config, "head_dim"):
+            config.head_dim = hf_config.head_dim
+        else:
+            config.head_dim = hf_config.hidden_size // hf_config.num_attention_heads
+        config.rope_head_dim = config.head_dim
+        config.norm_eps = hf_config.rms_norm_eps
+        config.rope_theta = hf_config.rope_theta
+        config.softmax_scale = config.head_dim**-0.5
+        config.n_dense_layers = hf_config.num_hidden_layers
+        config.intermediate_size = hf_config.intermediate_size
+        config.def_tp_size = get_tensor_model_parallel_world_size()
+        config.def_dp_size = 1
+        config.moe_ep_size = 1
+        config.moe_tp_size = 1
+
+        config.attn_type = AttnMHA
+        config.weight_nz = envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2
+        scheduler_config = vllm_config.scheduler_config
+        max_batch_size = scheduler_config.max_num_seqs
+        max_seq_len = vllm_config.model_config.max_model_len
+        config.max_m = scheduler_config.max_num_batched_tokens
+        config.max_batch_size = max_batch_size
+        config.max_seq_len = max_seq_len
+        config.block_size = vllm_config.cache_config.block_size
+        return config
+
+    def _build_model(self, runnable: nn.Module, vllm_config: VllmConfig,
+                     config: ModelConfig) -> Model:
+        params_dict = dict(runnable.named_parameters())
+
+        if hasattr(runnable, "language_model"):
+            layers = runnable.language_model.model.layers
+            model_prefix = "language_model."
+        else:
+            layers = runnable.model.layers
+            model_prefix = ""
+
         xlite_model = Model()
-        xlite_model.embed = params_dict.get("model.embed_tokens.weight")
-        xlite_model.norm = params_dict.get("model.norm.weight")
-        if vllm_config.model_config.hf_config.tie_word_embeddings:
+        xlite_model.embed = params_dict.get(model_prefix +
+                                            "model.embed_tokens.weight")
+        xlite_model.norm = params_dict.get(model_prefix + "model.norm.weight")
+        if vllm_config.model_config.hf_text_config.tie_word_embeddings:
             xlite_model.head = xlite_model.embed
         else:
-            xlite_model.head = params_dict.get("lm_head.weight")
+            xlite_model.head = params_dict.get(model_prefix + "lm_head.weight")
         xlite_model.attn_norm = [
             layer.input_layernorm.weight for layer in layers
         ]
@@ -72,8 +129,14 @@ class LlamaXliteModel(XliteModel):
         ]
         xlite_model.mlp_up_gate = [
             layer.mlp.gate_up_proj.weight for layer in layers
+            if hasattr(layer.mlp, "gate_up_proj")
+            and layer.mlp.gate_up_proj.weight is not None
         ]
-        xlite_model.mlp_down = [layer.mlp.down_proj.weight for layer in layers]
+        xlite_model.mlp_down = [
+            layer.mlp.down_proj.weight for layer in layers
+            if hasattr(layer.mlp, "down_proj")
+            and layer.mlp.down_proj.weight is not None
+        ]
         mha_qkv_bias = [
             layer.self_attn.qkv_proj.bias for layer in layers
             if hasattr(layer.self_attn.qkv_proj, "bias")
@@ -101,48 +164,7 @@ class LlamaXliteModel(XliteModel):
             xlite_model.mha_q_norm = q_norm
             xlite_model.mha_k_norm = k_norm
 
-        rank = torch.distributed.get_rank()
-        xlite_model.init(config, rank)
-
-        freq_cis = self._precompute_freqs_cis(config.head_dim,
-                                              config.max_seq_len, dtype,
-                                              config.rope_theta)
-
-        return (xlite_model, freq_cis, config.hidden_size, dtype)
-
-    def _build_model_config(self, vllm_config: VllmConfig) -> ModelConfig:
-        hf_config = vllm_config.model_config.hf_config
-        config = ModelConfig()
-        config.vocab_size = hf_config.vocab_size
-        config.hidden_size = hf_config.hidden_size
-        config.n_layers = hf_config.num_hidden_layers
-        config.n_heads = hf_config.num_attention_heads
-        config.n_kv_heads = hf_config.num_key_value_heads
-        if hasattr(hf_config, "head_dim"):
-            config.head_dim = hf_config.head_dim
-        else:
-            config.head_dim = hf_config.hidden_size // hf_config.num_attention_heads
-        config.rope_head_dim = config.head_dim
-        config.norm_eps = hf_config.rms_norm_eps
-        config.rope_theta = hf_config.rope_theta
-        config.softmax_scale = config.head_dim**-0.5
-        config.n_dense_layers = hf_config.num_hidden_layers
-        config.intermediate_size = hf_config.intermediate_size
-        config.def_tp_size = get_tensor_model_parallel_world_size()
-        config.def_dp_size = 1
-        config.moe_ep_size = 1
-        config.moe_tp_size = 1
-
-        config.attn_type = AttnMHA
-        config.weight_nz = is_enable_nz()
-        scheduler_config = vllm_config.scheduler_config
-        max_batch_size = scheduler_config.max_num_seqs
-        max_seq_len = vllm_config.model_config.max_model_len
-        config.max_m = scheduler_config.max_num_batched_tokens
-        config.max_batch_size = max_batch_size
-        config.max_seq_len = max_seq_len
-        config.block_size = vllm_config.cache_config.block_size
-        return config
+        return xlite_model
 
     def _precompute_freqs_cis(self,
                               dim: int,
@@ -159,6 +181,62 @@ class LlamaXliteModel(XliteModel):
         return freq_cis.to(device='npu')
 
 
+class QwenMoeXliteModel(LlamaXliteModel):
+
+    def initialize(
+            self, runnable: nn.Module,
+            vllm_config: VllmConfig) -> Tuple[Model, int, int, torch.dtype]:
+        if envs_ascend.VLLM_ASCEND_ENABLE_NZ == 2:
+            architecture = vllm_config.model_config.architectures[0]
+            raise ValueError(
+                f"{architecture} not support VLLM_ASCEND_ENABLE_NZ = 2!")
+        dtype = vllm_config.model_config.dtype
+        config = self._build_model_config(vllm_config)
+        xlite_model = self._build_model(runnable, vllm_config, config)
+        rank = torch.distributed.get_rank()
+        xlite_model.init(config, rank)
+
+        freq_cis = super()._precompute_freqs_cis(config.head_dim,
+                                                 config.max_seq_len, dtype,
+                                                 config.rope_theta)
+
+        return (xlite_model, freq_cis, config.hidden_size, dtype)
+
+    def _build_model_config(self, vllm_config: VllmConfig) -> ModelConfig:
+        config = super()._build_model_config(vllm_config)
+        hf_config = vllm_config.model_config.hf_text_config
+        ep_group = get_ep_group()
+        config.n_layers = hf_config.max_window_layers
+        config.n_dense_layers = 0
+        config.n_routed_experts = hf_config.num_experts
+        config.n_shared_experts = 0
+        config.n_act_experts = hf_config.num_experts_per_tok
+        config.def_dp_size = vllm_config.parallel_config.data_parallel_size
+        config.moe_ep_size = ep_group.world_size if vllm_config.parallel_config.enable_expert_parallel else 1
+        config.moe_tp_size = 1 if vllm_config.parallel_config.enable_expert_parallel else ep_group.world_size
+        config.experts_weight_transpose = True # type: ignore
+        config.moe_intermediate_size = hf_config.moe_intermediate_size
+        config.norm_topk_prob = hf_config.norm_topk_prob # type: ignore
+        config.scoring_func = ScoringFuncSoftmax # type: ignore
+        return config
+
+    def _build_model(self, runnable: nn.Module, vllm_config: VllmConfig,
+                     config: ModelConfig) -> Model:
+        xlite_model = super()._build_model(runnable, vllm_config, config)
+        layers = runnable.model.layers
+        xlite_model.gate = [layer.mlp.gate.weight for layer in layers]
+        xlite_model.re_up_gate = [
+            layer.mlp.experts.w13_weight[i] for layer in layers
+            for i in range(layer.mlp.experts.local_num_experts)
+        ]
+        xlite_model.re_down = [
+            layer.mlp.experts.w2_weight[i] for layer in layers
+            for i in range(layer.mlp.experts.local_num_experts)
+        ]
+
+        return xlite_model
+
+
 def xlite_model_init(
         runnable: nn.Module,
         vllm_config: VllmConfig) -> Tuple[Model, int, int, torch.dtype]:
@@ -166,6 +244,8 @@ def xlite_model_init(
         "LlamaForCausalLM": LlamaXliteModel,
         "Qwen2ForCausalLM": LlamaXliteModel,
         "Qwen3ForCausalLM": LlamaXliteModel,
+        "Qwen3VLForConditionalGeneration": LlamaXliteModel,
+        "Qwen3MoeForCausalLM": QwenMoeXliteModel,
     }
 
     architecture = vllm_config.model_config.architectures[0]
@@ -187,7 +267,8 @@ class XliteWrapper:
         rank = torch.distributed.get_rank()
         local_rank = get_world_group().local_rank
         self.xlite_rt = Runtime(local_rank, 0, rank,
-                                get_tensor_model_parallel_world_size())
+                                get_tensor_model_parallel_world_size(),
+                                vllm_config.parallel_config.data_parallel_size)
 
         (self.xlite_model, self.freq_cis, hidden_size,
          dtype) = xlite_model_init(runnable, vllm_config)
@@ -245,17 +326,30 @@ class XliteWrapper:
         ]
 
         if not with_prefill or self.full_mode:
-            batch = attn_metadata.num_prefills + attn_metadata.num_decodes
+            # TODO: When vllm_ascend enables graph mode, attn_metadata.num_decodes
+            # will be padded in decode requests. Therefore, it is first fixed using
+            # num_decode_tokens. However, in the future, when MTP is enabled, there
+            # may be cases where a single request involves multiple tokens, which
+            # will need to be solved.
+            num_decodes = attn_metadata.num_decode_tokens
+            num_prefills = attn_metadata.num_prefills
+            batch = num_prefills + num_decodes
             seq_lens = attn_metadata.seq_lens[:batch]
-            query_lens = attn_metadata.query_lens[:batch]
+            seq_tensor = torch.cat([
+                torch.tensor([0]),
+                torch.tensor(attn_metadata.actual_seq_lengths_q)
+            ],
+                                   dim=0)
+            query_lens = seq_tensor[1:] - seq_tensor[:-1]
+            query_lens = query_lens[:batch]
             cached_lens = seq_lens - query_lens
 
             xlite_attn_metadata = ModelAttnMeta()
             xlite_attn_metadata.lens = query_lens.tolist()
             xlite_attn_metadata.cached_lens = cached_lens.tolist()
-            xlite_attn_metadata.is_prefills = [
-                False
-            ] * attn_metadata.num_decodes + [True] * attn_metadata.num_prefills
+            xlite_attn_metadata.is_prefills = [False] * num_decodes + [
+                True
+            ] * num_prefills
             xlite_attn_metadata.block_tables = attn_metadata.block_tables.cpu(
             ).tolist()
 

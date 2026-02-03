@@ -42,19 +42,7 @@
 #    Future Plan:
 #       Find a better way to support tensor alignment for 310p without this patch.
 #
-# ** 2. File: platform/patch_ec_connector.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.distributed.ec_transfer.ec_connector.shared_storage_connector.ECSharedStorageConnector.start_load_caches`
-#    Why:
-#       it's hard code to cuda
-#    How：
-#       change the cuda to npu
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/30225
-#    Future Plan:
-#       Remove this patch when vllm merges the PR.
-#
-# ** 3. File: platform/patch_mamba_config.py**
+# ** 2. File: platform/patch_mamba_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.config.HybridAttentionMambaModelConfig.verify_and_update_config`
 #    Why:
@@ -66,7 +54,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM merges the PR.
 #
-# ** 4. File: platform/patch_multiproc_executor.py**
+# ** 3. File: platform/patch_multiproc_executor.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.executor.multiproc_executor.MultiprocExecutor`
 #    Why:
@@ -79,7 +67,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM fix the issue.
 #
-# ** 5. File: platform/patch_sched_yield.py**
+# ** 4. File: platform/patch_sched_yield.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.distributed.utils.USE_SCHED_YIELD`
 #    Why:
@@ -91,36 +79,40 @@
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
 #
+# ** 5. File: platform/patch_balance_schedule.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.engine.core.EngineCoreProc.run_engine_core`
+#      `vllm.v1.core.sched.scheduler.Scheduler`
+#    Why:
+#       vLLM v1 scheduling currently enables chunkedprefill by default, which processes prefill and decode
+#       requests simultaneously in a single scheduling session. This can impact the overall system throughput
+#       and performance in some scenarios.
+#    How：
+#       Set environmental variables VLLM_ASCEND_BALANCE_SCHEDULING=1 in startup script.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/29721
+#    Future Plan:
+#       Remove this patch when vLLM merge the PR.
 #
 # * Worker Patch:
 # ===============
 #
-# ** 1. File: worker/patch_deepseek.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `DeepseekV2Model.forward`
-#    Why:
-#       getattr(self.config, "llama_4_scaling", None) will raise AttributeError
-#       on npu with graph mode.
-#    How：
-#       catch the AttributeError and set llama_4_scaling to None.
-#    Related PR (if no, explain why):
-#       No, this is a bug in vLLM Ascend
-#    Future Plan:
-#       Find the root cause of this bug and fix it in vLLM Ascend.
-#
-# ** 2. File: worker/patch_distributed.py **
+# ** 1. File: worker/patch_distributed.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.distributed.parallel_state.GroupCoordinator`
 #    Why:
 #       vllm doesn't support all_to_all for GroupCoordinator.
+#       all_reduce in vLLM not is a customop, which will make MatmulAllReduceAddRMSNorm fusion failure.
 #    How：
 #       Add all_to_all implementation for GroupCoordinator.
+#       make all_reduce as a customop.
 #    Related PR (if no, explain why):
 #       No, we should use vlLM all2all manager to support all_to_all for npu.
 #    Future Plan:
 #       Remove this patch when the refactor of all2all manager is done.
+#       Remove this patch when vLLM support all_reduce as customop.
 #
-# ** 3. File: worker/patch_minicpm.py **
+# ** 2. File: worker/patch_minicpm.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.minicpm.MiniCPMAttention.forward`
 #    Why:
@@ -134,7 +126,7 @@
 #    Future Plan:
 #       Keep this patch in vllm-ascend.
 #
-# ** 4. File: worker/patch_multimodal_merge.py**
+# ** 3. File: worker/patch_multimodal_merge.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.utils._merge_multimodal_embeddings`
 #    Why:
@@ -146,53 +138,7 @@
 #    Future Plan:
 #       Identify this pattern in torch-npu and remove this patch.
 #
-# ** 5. File: worker/patch_qwen2_5_omni.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.qwen2_5_omni_thinker.Qwen2_5OmniThinkerForConditionalGeneration`
-#    Why:
-#       we have ascend forward context which doesn't work with upstream.
-#    How：
-#       override forward_context in the model file
-#    Related PR (if no, explain why):
-#       This is a bug by Ascend only. we should drop set_ascend_forward_context
-#    Future Plan:
-#       Remove this patch once forward_context is refactor.
-#
-# ** 6. File: worker/patch_qwen2_5_vl.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.qwen2_5_vl.Qwen2_5_VLForConditionalGeneration`
-#    Why:
-#       we have ascend forward context which doesn't work with upstream.
-#    How：
-#       override forward_context in the model file
-#    Related PR (if no, explain why):
-#       This is a bug by Ascend only. we should drop set_ascend_forward_context
-#    Future Plan:
-#       Remove this patch once forward_context is refactor.
-#
-#   2. `vllm.model_executor.models.qwen2_vl.Qwen2VisionAttention.forward`
-#    Why:
-#       the attention is not custom ops
-#    How：
-#       make it to custom ops and pluggable
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/30125
-#    Future Plan:
-#       Remove this patch one the PR is merged into vLLM.
-#
-# ** 7. File: worker/patch_qwen3_vl.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.models.qwen3_vl.Qwen3_VisionTransformer.forward`
-#    Why:
-#       the attention is not custom ops
-#    How：
-#       make it to custom ops and pluggable
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/30125
-#    Future Plan:
-#       Remove this patch one the PR is merged into vLLM.
-#
-# ** 8. File: worker/patch_roberta.py **
+# ** 4. File: worker/patch_roberta.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.bert `
 #    Why:
@@ -204,9 +150,10 @@
 #    Future Plan:
 #       Revert this when CANN support shift aclnn operation
 #
-# ** 9. File: worker/patch_triton.py**
+# ** 5. File: worker/patch_triton.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.mamba.ops`, `vllm.model_executor.layers.fla.ops`
+#   1. `vllm.model_executor.layers.mamba.ops`, `vllm.model_executor.layers.fla.ops`,
+#      `vllm.v1.worker.gpu.sample.gumbel.gumbel_sample`
 #    Why:
 #       triton ops in vLLM perform not good on NPU. And there is no dispatch mechanism for triton ops.
 #    How：
@@ -216,19 +163,7 @@
 #    Future Plan:
 #       Remove this patch when vLLM support the dispatch function.
 #
-# ** 10. File: worker/patch_weight_loader.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.linear.UnquantizedLinearMethod`
-#    Why:
-#       vLLM Ascend doesn't work with weight loader v2
-#    How：
-#       patch it to fix the bug.
-#    Related PR (if no, explain why):
-#       This is a bug by Ascend only.  We should fix it soon
-#    Future Plan:
-#       Remove this patch when the bug is fixed.
-#
-# ** File: worker/patch_qwen3_next_mtp.py**
+# ** 6. File: worker/patch_qwen3_next_mtp.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.utils.bind_kv_cache`
 #    Why:
@@ -237,19 +172,94 @@
 #       Replace with a new bind_kv_cache.
 #       Skip the raise.
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/4770
+#       It need discuss.
 #    Future Plan:
 #       Remove this patch after discussing with vllm community and adapting bind_kv_cache to npu.
 #
-# ** File: worker/patch_module.py**
+# ** 7. File: worker/patch_module.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.attention.backends.gdn_attn.torch.argsort`
 #    Why:
-#       'torch.argsort' func of npu does not support bool.
+#       1. 'torch.argsort' func of npu does not support bool.
+#       2. Without `stable=True`, the output will have a lot of redundant tokens.
 #    How：
-#       Replace with a new torch.argsort that will cast the input to torch.int32.
+#       Replace with a new torch.argsort that will cast the input to torch.int32
+#       and do stable sort.
 #    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/4770
+#       1. It depends on torch_npu.
+#       2. https://github.com/vllm-project/vllm/pull/30632
 #    Future Plan:
 #       Remove this patch when bool is supported in 'torch.argsort' func of npu.
+#       Make 'torch.argsort' in `vllm.v1.attention.backends.gdn_attn` be stable.
 #
+# ** 8. File: worker/patch_rejection_sampler.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.sample.rejection_sampler`
+#    Why:
+#       - some functions from `rejection_sampler` are not supported or slow on npu.
+#    How：
+#       - add npu_top_k_top_p to 'apply_sampling_constraints' func
+#       - add custom triton kernel to `expand_batch_to_tokens` and `rejection_sample`
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/874
+#       https://github.com/vllm-project/vllm/pull/4849
+#    Future Plan:
+#       1. make these functions as class func of RejectionSampler, create AscendRejectionSampler
+#           to override them, then delete the patch file `worker/patch_rejection_sampler.py`.
+#       2. make these functions as costom op, then remove AscendRejectionSampler
+#
+# ** 9.File: worker/patch_qwen3_next.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet.forward`
+#    Why:
+#       The Qwen3Next GatedDeltaNet forward cannot directly add custom operators.
+#    How：
+#       Add a branch in Qwen3NextGatedDeltaNet.forward to adapt to fused_qkvzba_split_reshape_cat.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/30863
+#    Future Plan:
+#       Remove this patch when vLLM support these operators.
+#
+# ** 10. File: worker/patch_qwen3_next.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet._forward_core`
+#    Why:
+#       triton ops fused_recurrent_gated_delta_rule and fused_gdn_gating in vLLM perform not good on NPU.
+#    How：
+#       add a new fused triton ops in vLLM with ascend implementation.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/30860
+#    Future Plan:
+#       Remove this patch when vLLM support these operators.
+#
+#   2. `vllm.model_executor.models.qwen3_next.Qwen3NextGatedDeltaNet._forward_core`
+#    Why:
+#       The Qwen3Next GatedDeltaNet _forward_core cannot directly add custom operators.
+#    How：
+#       Add a branch in Qwen3NextGatedDeltaNet._forward_core to adapt to fused_gdn_gating_patch.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/31002
+#    Future Plan:
+#       Remove this patch when vLLM support these operators.
+#
+# ** 11. File: worker/patch_v2_eagle.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.gpu.spec_decode.eagle.EagleSpeculator.propose`
+#    Why:
+#       `propose` method use torch.gather, but the gather operator will
+#       pollute the arguments passed to it. the bug is reported to huawei
+#       CANN team, but not fixed yet.
+#    How：
+#       clone the out attribute ahead of gather to avoid the bug.
+#    Future Plan:
+#       Remove this patch when cann fix the gather bug.
+#
+# ** 12. File: worker/patch_unquantized_gemm.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.utils.default_unquantized_gemm`
+#    Why:
+#       unquantized_gemm in vLLM not is a customop, which will make MatmulAllReduceAddRMSNorm fusion failure.
+#    How：
+#       make unquantized_gemm as a customop.
+#    Future Plan:
+#       Remove this patch when vLLM support the operator as customop.
