@@ -69,6 +69,7 @@ docker run --rm \
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
 ## Deployment
+
 ### Service-oriented  Deployment
 
 - `DeepSeek-R1-W8A8`: require 1 Atlas 800 A3 (64G × 16) nodes or 2 Atlas 800 A2 (64G × 8).
@@ -88,11 +89,13 @@ local_ip="xxxx"
 
 # AIV
 export HCCL_OP_EXPANSION_MODE="AIV"
+
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
-export VLLM_ASCEND_ENABLE_MLAPO=1
+export VLLM_ASCEND_BALANCE_SCHEDULING=1
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_USE_MODELSCOPE=True
 
 vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
@@ -104,14 +107,24 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
   --seed 1024 \
   --served-model-name deepseek_r1 \
   --enable-expert-parallel \
+  --async-scheduling \
   --max-num-seqs 16 \
   --max-model-len 16384 \
   --max-num-batched-tokens 4096 \
   --trust-remote-code \
   --gpu-memory-utilization 0.92 \
-  --speculative-config '{"num_speculative_tokens":1,"method":"mtp"}' \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+  --speculative-config '{"num_speculative_tokens":3,"method":"mtp"}' \
+  --compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
+
+**Notice:**
+The parameters are explained as follows:
+
+- Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
+- For single-node deployment, we recommend using `dp4tp4` instead of `dp2tp8`.
+- `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5K and output length of 1.5K, a value of `16384` is sufficient, however, for precision testing, please set it at least `35000`.
+- `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
+- If you use the w4a8 weight, more memory will be allocated to kvcache, and you can try to increase system throughput to achieve greater throughput.
 
 ::::
 ::::{tab-item} DeepSeek-R1-W8A8 A2 series
@@ -128,14 +141,15 @@ Run the following scripts on two nodes respectively.
 nic_name="xxxx"
 local_ip="xxxx"
 
-# AIV
-export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export HCCL_BUFFSIZE=200
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_MLAPO=1
+export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
 export VLLM_USE_MODELSCOPE=True
@@ -152,13 +166,14 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
   --seed 1024 \
   --served-model-name deepseek_r1 \
   --enable-expert-parallel \
+  --async-scheduling \
   --max-num-seqs 16 \
   --max-model-len 16384 \
   --max-num-batched-tokens 4096 \
   --trust-remote-code \
-  --gpu-memory-utilization 0.94 \
-  --speculative-config '{"num_speculative_tokens":1,"method":"mtp"}' \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' 
+  --gpu-memory-utilization 0.92 \
+  --speculative-config '{"num_speculative_tokens":3,"method":"mtp"}' \
+  --compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
 **Node 1**
@@ -172,14 +187,15 @@ nic_name="xxxx"
 local_ip="xxxx"
 node0_ip="xxxx" # same as the local_IP address in node 0
 
-# AIV
-export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export HCCL_BUFFSIZE=200
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_MLAPO=1
+export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export HCCL_INTRA_PCIE_ENABLE=1
 export HCCL_INTRA_ROCE_ENABLE=0
 export VLLM_USE_MODELSCOPE=True
@@ -198,13 +214,14 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
   --seed 1024 \
   --served-model-name deepseek_r1 \
   --enable-expert-parallel \
+  --async-scheduling \
   --max-num-seqs 16 \
   --max-model-len 16384 \
   --max-num-batched-tokens 4096 \
   --trust-remote-code \
-  --gpu-memory-utilization 0.94 \
-  --speculative-config '{"num_speculative_tokens":1,"method":"mtp"}' \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+  --gpu-memory-utilization 0.92 \
+  --speculative-config '{"num_speculative_tokens":3,"method":"mtp"}' \
+  --compilation-config '{"cudagraph_capture_sizes":[4,16,32,48,64], "cudagraph_mode": "FULL_DECODE_ONLY"}'
 ```
 
 ::::
@@ -212,7 +229,7 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
 
 ### Prefill-Decode Disaggregation
 
-We recommend using Mooncake for deployment: [Mooncake](./multi_node_pd_disaggregation_mooncake.md).
+We recommend using DeepSeek-V3.1 for deployment: [DeepSeek-V3.1](./DeepSeek-V3.1.md).
 
 This solution has been tested and demonstrates excellent performance.
 
@@ -226,7 +243,7 @@ curl http://<node0_ip>:<port>/v1/completions \
     -d '{
         "model": "deepseek_r1",
         "prompt": "The future of AI is",
-        "max_tokens": 50,
+        "max_completion_tokens": 50,
         "temperature": 0
     }'
 ```
@@ -265,6 +282,7 @@ lm_eval \
 3. After execution, you can get the result.
 
 ## Performance
+
 ### Using AISBench
 
 Refer to [Using AISBench for performance evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
@@ -276,6 +294,7 @@ Run performance evaluation of `DeepSeek-R1-W8A8` as an example.
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
 
 There are three `vllm bench` subcommand:
+
 - `latency`: Benchmark the latency of a single batch of requests.
 - `serve`: Benchmark the online serving throughput.
 - `throughput`: Benchmark offline inference throughput.
