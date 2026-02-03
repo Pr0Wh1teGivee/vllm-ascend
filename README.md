@@ -75,6 +75,12 @@ We welcome and value any contributions and collaborations:
 - Please let us know if you encounter a bug by [filing an issue](https://github.com/vllm-project/vllm-ascend/issues)
 - Please use [User forum](https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support) for usage questions and help.
 
+## Contributors
+
+[![Contributors](https://img.shields.io/github/contributors/vllm-project/vllm-ascend?style=flat-square)](https://github.com/vllm-project/vllm-ascend/graphs/contributors)
+
+Thank you to all our contributors! 🦋
+
 ## Branch
 
 vllm-ascend has a main branch and a dev branch.
